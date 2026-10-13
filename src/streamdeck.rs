@@ -74,7 +74,7 @@ fn pretty(app: &str) -> String {
 /// State and title of a key.
 fn look(shared: &SharedRef, id: Key) -> (State, String) {
     let sh = shared.lock().unwrap();
-    let Some(rule) = sh.config.rules.iter().find(|r| r.id == id) else { return (State::Paused, "Configura".into()) };
+    let Some(rule) = sh.config.rules.iter().find(|r| r.id == id) else { return (State::Paused, "Set up".into()) };
     let title = rule.sources.iter().map(|a| pretty(a)).collect::<Vec<_>>().join("\n"); // the rule's trigger apps
     let state = if !rule.enabled {
         State::Paused
