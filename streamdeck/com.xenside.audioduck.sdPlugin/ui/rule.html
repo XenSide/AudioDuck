@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<style>
+	:root { --bg: #2d2d2d; --input: #3d3d3d; --line: #4a4a4a; --text: #d8d8d8; --muted: #969696; }
+	* { box-sizing: border-box; }
+	body { margin: 0; padding: 10px 12px 16px; background: var(--bg); color: var(--text); font: 9pt -apple-system, "Segoe UI", sans-serif; }
+	.line { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+	.line > span { flex: 0 0 60px; color: var(--muted); }
+	select { flex: 1; min-width: 0; background: var(--input); color: var(--text); border: 1px solid var(--line); border-radius: 3px; padding: 3px 6px; font: inherit; }
+	.muted { color: var(--muted); }
+</style>
+</head>
+<body>
+	<div class="line"><span>Regola</span><select id="rule"><option value="0">…</option></select></div>
+	<p class="muted">Premendo il tasto la regola si disattiva o si riattiva. Le regole si creano e si modificano dal tasto Ducking.</p>
+
+<script>
+	let ws, uuid, settings = {};
+	const pretty = (app) => { const s = app.replace(/\.exe$/, ''); return s.charAt(0).toUpperCase() + s.slice(1); };
+	const select = document.getElementById('rule');
+
+	window.connectElgatoStreamDeckSocket = (port, inUUID, registerEvent, info, actionInfo) => {
+		uuid = inUUID;
+		try { settings = JSON.parse(actionInfo).payload.settings || {}; } catch { settings = {}; }
+		ws = new WebSocket('ws://127.0.0.1:' + port);
+		ws.onopen = () => {
+			ws.send(JSON.stringify({ event: registerEvent, uuid }));
+			ws.send(JSON.stringify({ event: 'sendToPlugin', context: uuid, payload: {} })); // ask for the rules
+		};
+		ws.onmessage = (e) => {
+			const m = JSON.parse(e.data);
+			if (m.event === 'sendToPropertyInspector' && m.payload.config) render(m.payload.config.rules);
+		};
+	};
+
+	function render(rules) {
+		const opts = rules.map((r) => {
+			const listed = r.targets.map(pretty).join(', ');
+			const targets = r.all_others ? (listed ? 'tutte tranne ' + listed : 'tutte le altre') : listed;
+			return new Option(r.sources.map(pretty).join(', ') + ' → ' + targets + ' (' + Math.round(r.level * 100) + '%)', r.id);
+		});
+		if (!rules.some((r) => r.id === settings.rule)) opts.unshift(new Option(rules.length ? '— scegli una regola —' : 'Nessuna regola: creala dal tasto Ducking', 0));
+		select.replaceChildren(...opts);
+		select.value = settings.rule || 0;
+	}
+
+	select.onchange = () => {
+		settings = { rule: Number(select.value) };
+		ws.send(JSON.stringify({ event: 'setSettings', context: uuid, payload: settings }));
+	};
+</script>
+</body>
+</html>

@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<style>
+	:root { --bg: #2d2d2d; --row: #3a3a3a; --input: #3d3d3d; --line: #4a4a4a; --text: #d8d8d8; --muted: #969696; --accent: #7c9cff; --duck: #ffb454; }
+	* { box-sizing: border-box; }
+	body { margin: 0; padding: 10px 12px 16px; background: var(--bg); color: var(--text); font: 9pt -apple-system, "Segoe UI", sans-serif; }
+	h2 { font-size: 9pt; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin: 16px 0 6px; }
+	button { background: var(--input); color: var(--text); border: 1px solid #5a5a5a; border-radius: 3px; padding: 3px 9px; font: inherit; cursor: pointer; }
+	button.primary { background: var(--accent); color: #15161b; border-color: var(--accent); font-weight: 600; }
+	input[type=text], input[type=number] { background: var(--input); color: var(--text); border: 1px solid var(--line); border-radius: 3px; padding: 3px 6px; font: inherit; }
+	input[type=range] { accent-color: var(--accent); flex: 1; }
+	input[type=checkbox] { accent-color: var(--accent); margin: 0 6px 0 0; }
+	label { display: flex; align-items: center; }
+	.line { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+	.line > span:first-child { flex: 0 0 120px; color: var(--muted); }
+	.status { font-size: 11pt; font-weight: 600; }
+	.rule { display: flex; align-items: center; gap: 6px; background: var(--row); border-radius: 4px; padding: 5px 6px; margin: 4px 0; }
+	.rule .what { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+	.rule .pct { color: var(--muted); }
+	.muted { color: var(--muted); }
+	.editor { background: var(--row); border-radius: 4px; padding: 8px; margin: 6px 0; }
+	.cols { display: flex; gap: 8px; }
+	.cols > div { flex: 1; min-width: 0; }
+	.list { background: var(--bg); border-radius: 3px; padding: 4px 6px; max-height: 160px; overflow-y: auto; }
+	.list label { margin: 3px 0; overflow-wrap: anywhere; }
+	.error { color: var(--duck); }
+	.app { display: grid; grid-template-columns: 90px 1fr 70px; align-items: center; gap: 8px; margin: 5px 0; }
+	.app .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.bar { height: 6px; background: var(--input); border-radius: 3px; overflow: hidden; }
+	.bar > div { height: 100%; background: var(--accent); }
+	.bar.loud > div { background: var(--duck); }
+	.vol { text-align: right; color: var(--muted); }
+	.vol.down { color: var(--duck); }
+</style>
+</head>
+<body>
+	<div class="line" style="justify-content: space-between">
+		<span class="status" id="status">…</span>
+		<label><input type="checkbox" id="enabled" />Ducking attivo</label>
+	</div>
+
+	<h2>Regole</h2>
+	<div id="rules"></div>
+	<div id="editor"></div>
+	<button class="primary" id="add">+ Nuova regola</button>
+
+	<h2>App in riproduzione</h2>
+	<div id="apps" class="muted">Nessuna app sta usando l'audio.</div>
+
+	<h2>Impostazioni</h2>
+	<div class="line" title="Le barre diventano arancioni sopra la soglia">
+		<span>Soglia attivazione</span><input type="range" id="threshold" min="1" max="30" /><span id="thresholdPct"></span>
+	</div>
+	<div class="line"><span>Discesa</span><input type="number" id="attack_ms" min="0" max="5000" step="10" /> ms</div>
+	<div class="line"><span>Attesa prima di risalire</span><input type="number" id="hold_ms" min="0" max="5000" step="10" /> ms</div>
+	<div class="line"><span>Risalita</span><input type="number" id="release_ms" min="0" max="5000" step="10" /> ms</div>
+
+<script>
+	let ws, uuid, config = null, live = { peaks: [], gains: {}, volumes: {}, ducking: false }, editing = null;
+	const $ = (id) => document.getElementById(id);
+	const el = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids); return e; };
+	const pretty = (app) => { const s = app.replace(/\.exe$/, ''); return s.charAt(0).toUpperCase() + s.slice(1); };
+
+	window.connectElgatoStreamDeckSocket = (port, inUUID, registerEvent) => {
+		uuid = inUUID;
+		ws = new WebSocket('ws://127.0.0.1:' + port);
+		ws.onopen = () => {
+			ws.send(JSON.stringify({ event: registerEvent, uuid }));
+			toPlugin({}); // ask for the config
+		};
+		ws.onmessage = (e) => {
+			const m = JSON.parse(e.data);
+			if (m.event !== 'sendToPropertyInspector') return;
+			if (m.payload.config) { config = m.payload.config; renderConfig(); }
+			if (m.payload.live) { live = m.payload.live; renderLive(); }
+		};
+	};
+
+	function toPlugin(payload) {
+		if (ws && ws.readyState === 1) ws.send(JSON.stringify({ event: 'sendToPlugin', context: uuid, payload }));
+	}
+
+	function save() {
+		toPlugin({ config });
+		renderConfig();
+	}
+
+	function renderConfig() {
+		if (!config) return;
+		$('enabled').checked = config.enabled;
+		const s = config.settings;
+		$('threshold').value = Math.round(s.threshold * 100);
+		$('thresholdPct').textContent = Math.round(s.threshold * 100) + '%';
+		for (const k of ['attack_ms', 'hold_ms', 'release_ms']) if (document.activeElement !== $(k)) $(k).value = s[k];
+
+		const rules = $('rules');
+		rules.replaceChildren();
+		if (!config.rules.length) rules.append(el('div', { className: 'muted', textContent: 'Nessuna regola. Esempio: quando suona Discord, abbassa Spotify al 20%.' }));
+		config.rules.forEach((r, i) => {
+			const on = el('input', { type: 'checkbox', checked: r.enabled, title: 'Attiva/disattiva regola' });
+			on.onchange = () => { r.enabled = on.checked; save(); };
+			const listed = r.targets.map(pretty).join(', ');
+			const targets = r.all_others ? (listed ? 'tutte le altre app tranne ' + listed : 'tutte le altre app') : listed;
+			const edit = el('button', { textContent: 'Modifica' });
+			edit.onclick = () => openEditor(i);
+			const del = el('button', { textContent: '×', title: 'Elimina' });
+			del.onclick = () => { config.rules.splice(i, 1); editing = null; renderEditor(); save(); };
+			rules.append(el('div', { className: 'rule' }, on,
+				el('span', { className: 'what' }, el('b', { textContent: r.sources.map(pretty).join(', ') }), ' → ' + targets),
+				el('span', { className: 'pct', textContent: Math.round(r.level * 100) + '%' }), edit, del));
+		});
+		renderStatus();
+	}
+
+	function renderStatus() {
+		if (!config) return;
+		const st = $('status');
+		st.textContent = !config.enabled ? 'In pausa' : live.ducking ? 'Sta abbassando il volume…' : 'In ascolto';
+		st.style.color = config.enabled && live.ducking ? 'var(--duck)' : '';
+	}
+
+	function renderLive() {
+		renderStatus();
+		const apps = $('apps');
+		if (!live.peaks.length) { apps.className = 'muted'; apps.textContent = "Nessuna app sta usando l'audio."; return; }
+		apps.className = '';
+		apps.replaceChildren(...live.peaks.map(([app, peak]) => {
+			const g = config && config.enabled ? (live.gains[app] ?? 1) : 1;
+			const v = live.volumes[app];
+			const vol = v === undefined ? '' : 'vol ' + Math.round(v * g * 100) + '%';
+			const loud = config && peak > config.settings.threshold;
+			return el('div', { className: 'app' },
+				el('span', { className: 'name', textContent: pretty(app), title: app }),
+				el('div', { className: 'bar' + (loud ? ' loud' : '') }, el('div', { style: 'width:' + Math.min(100, peak * 100) + '%' })),
+				el('span', { className: 'vol' + (g < 0.999 ? ' down' : ''), textContent: g < 0.999 ? '↓ ' + vol : vol }));
+		}));
+	}
+
+	function openEditor(index) {
+		const r = index === null ? { sources: [], targets: [], all_others: false, level: 0.2, enabled: true } : config.rules[index];
+		const apps = [...new Set([...live.peaks.map(([a]) => a), ...r.sources, ...r.targets])].sort();
+		editing = { index, enabled: r.enabled, all_others: r.all_others, level: r.level, error: '',
+			sources: apps.map((a) => [a, r.sources.includes(a)]), targets: apps.map((a) => [a, r.targets.includes(a)]) };
+		renderEditor();
+	}
+
+	function renderEditor() {
+		const box = $('editor');
+		box.replaceChildren();
+		$('add').style.display = editing ? 'none' : '';
+		if (!editing) return;
+		const ed = editing;
+		const list = (items) => el('div', { className: 'list' }, ...items.map((it) => {
+			const c = el('input', { type: 'checkbox', checked: it[1] });
+			c.onchange = () => { it[1] = c.checked; };
+			return el('label', {}, c, it[0]);
+		}));
+		const others = el('input', { type: 'checkbox', checked: ed.all_others });
+		others.onchange = () => { ed.all_others = others.checked; renderEditor(); };
+		const manual = el('input', { type: 'text', placeholder: 'App non in riproduzione, es. spotify.exe', style: 'flex:1;min-width:0' });
+		const addManual = () => {
+			let app = manual.value.trim().toLowerCase();
+			if (!app) return;
+			if (!app.endsWith('.exe')) app += '.exe';
+			for (const l of [ed.sources, ed.targets]) if (!l.some(([a]) => a === app)) l.push([app, false]);
+			renderEditor();
+		};
+		manual.onkeydown = (e) => { if (e.key === 'Enter') addManual(); };
+		const addBtn = el('button', { textContent: 'Aggiungi', onclick: addManual });
+		const level = el('input', { type: 'range', min: 0, max: 100, value: Math.round(ed.level * 100) });
+		const pct = el('span', { textContent: Math.round(ed.level * 100) + '%' });
+		level.oninput = () => { ed.level = level.value / 100; pct.textContent = level.value + '%'; };
+		const ok = el('button', { className: 'primary', textContent: 'Salva' });
+		ok.onclick = () => {
+			const picked = (l) => l.filter(([, c]) => c).map(([a]) => a);
+			const sources = picked(ed.sources), targets = picked(ed.targets);
+			if (!sources.length) ed.error = "Scegli almeno un'app che fa scattare il ducking.";
+			else if (!ed.all_others && !targets.length) ed.error = "Scegli almeno un'app da abbassare.";
+			else {
+				const rule = { id: ed.index === null ? 0 : config.rules[ed.index].id, sources, targets, all_others: ed.all_others, level: ed.level, enabled: ed.enabled }; // the plugin gives new rules an id
+				if (ed.index === null) config.rules.push(rule); else config.rules[ed.index] = rule;
+				editing = null; renderEditor(); save(); return;
+			}
+			renderEditor();
+		};
+		const cancel = el('button', { textContent: 'Annulla', onclick: () => { editing = null; renderEditor(); } });
+		box.append(el('div', { className: 'editor' },
+			el('b', { textContent: ed.index === null ? 'Nuova regola' : 'Modifica regola' }),
+			el('div', { className: 'cols', style: 'margin-top:6px' },
+				el('div', {}, el('div', { className: 'muted', textContent: 'Quando suona…' }), list(ed.sources)),
+				el('div', {}, el('div', { className: 'muted', textContent: ed.all_others ? '…tranne queste' : '…abbassa' }), list(ed.targets))),
+			el('label', { style: 'margin-top:6px' }, others, 'Abbassa tutte le altre app'),
+			el('div', { className: 'line' }, manual, addBtn),
+			el('div', { className: 'line' }, el('span', { textContent: 'Volume durante il ducking', style: 'flex:0 0 auto' }), level, pct),
+			ed.error ? el('div', { className: 'error', textContent: ed.error }) : '',
+			el('div', { className: 'line', style: 'justify-content:flex-end' }, cancel, ok)));
+	}
+
+	$('add').onclick = () => openEditor(null);
+	$("enabled").onchange = () => { if (!config) return; config.enabled = $('enabled').checked; save(); };
+	$('threshold').oninput = () => { config.settings.threshold = $('threshold').value / 100; $('thresholdPct').textContent = $('threshold').value + '%'; };
+	$('threshold').onchange = save;
+	for (const k of ['attack_ms', 'hold_ms', 'release_ms']) {
+		$(k).onchange = () => { config.settings[k] = Math.max(0, Math.min(5000, parseInt($(k).value) || 0)); save(); };
+	}
+</script>
+</body>
+</html>
