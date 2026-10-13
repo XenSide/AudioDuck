@@ -64,19 +64,8 @@ fn app_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("AudioDuck")
 }
 
-/// The Python version's data dirs (Store Python virtualises %APPDATA% into its package dir).
-fn python_dirs() -> Vec<PathBuf> {
-    let Ok(dir) = std::fs::read_dir(PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default()).join("Packages")) else { return vec![] };
-    dir.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("PythonSoftwareFoundation")).map(|e| e.path().join(r"LocalCache\Roaming\AudioDuck")).collect()
-}
-
-/// First run takes over the Python version's file (config, or volumes it left ducked).
-fn read_with_fallback(file: &str) -> Option<String> {
-    std::iter::once(app_dir()).chain(python_dirs()).find_map(|d| std::fs::read_to_string(d.join(file)).ok())
-}
-
 fn load_config() -> Config {
-    read_with_fallback("config.json").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    std::fs::read_to_string(app_dir().join("config.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
 pub fn save_config(c: &Config) {
@@ -87,12 +76,7 @@ pub fn save_config(c: &Config) {
 /// Audio loop. Owns every COM object; talks to the plugin side only through `Shared`.
 fn engine(shared: SharedRef) {
     let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-    let state = app_dir().join("ducked_state.json");
-    if !state.exists() && let Some(s) = read_with_fallback("ducked_state.json") {
-        let _ = std::fs::create_dir_all(app_dir());
-        let _ = std::fs::write(&state, s);
-    }
-    let mut mixer = audio::Mixer::new(state);
+    let mut mixer = audio::Mixer::new(app_dir().join("ducked_state.json"));
     let mut cfg = shared.lock().unwrap().config.clone();
     let mut ducker = Ducker::default();
     let mut rev = u64::MAX;
