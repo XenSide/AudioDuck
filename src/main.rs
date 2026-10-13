@@ -21,7 +21,7 @@ use windows::core::w;
 const TICK: Duration = Duration::from_millis(30);
 const REFRESH: Duration = Duration::from_secs(1);
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub settings: Settings,
@@ -39,11 +39,6 @@ impl Config {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self { settings: Settings::default(), rules: vec![] }
-    }
-}
 
 /// What the engine measured. Per-app values are only filled while a property inspector is open.
 #[derive(Default, Serialize)]
