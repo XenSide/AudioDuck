@@ -1,5 +1,6 @@
-//! Stream Deck (and OpenDeck) side. One key action, one rule per key (settings `{"rule": id}`): a tap turns the rule off
-//! and on, the image shows its state, and the property inspector edits it (plus the shared timings) and shows live levels.
+//! Stream Deck (and OpenDeck) side. One key action, one rule per key (settings `{"rule": id, style…}`): a tap turns the rule
+//! off and on, the image (see keyimage.rs) shows its state, and the property inspector edits it (plus the shared timings
+//! and the key's style) and shows live levels.
 use std::collections::HashMap;
 use std::net::TcpStream;
 use std::time::Duration;
@@ -7,19 +8,10 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tungstenite::{Message, WebSocket};
 
-use crate::{Config, SharedRef, icon, save_config};
+use crate::keyimage::{Icons, State, key_image};
+use crate::{Config, SharedRef, save_config};
 
 const POLL: Duration = Duration::from_millis(250);
-
-#[derive(Clone, Copy, PartialEq)]
-enum State {
-    Paused,
-    Active,
-    Ducking,
-}
-
-/// The rule a visible key controls (0 = not set up yet).
-type Key = u64;
 
 type Ws = WebSocket<TcpStream>;
 
@@ -38,7 +30,7 @@ impl Args {
     }
 }
 
-fn base64(data: &[u8]) -> String {
+pub fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for c in data.chunks(3) {
@@ -54,36 +46,26 @@ fn send(ws: &mut Ws, v: Value) {
     let _ = ws.send(Message::text(v.to_string()));
 }
 
-fn show(ws: &mut Ws, ctx: &str, (state, title): &(State, String)) {
-    let color = match state {
-        State::Paused => icon::OFF,
-        State::Active => icon::ACCENT,
-        State::Ducking => icon::DUCKING,
+/// The key's image for its settings (`rule` id and style).
+fn image(shared: &SharedRef, icons: &mut Icons, settings: &Value) -> String {
+    let id = settings["rule"].as_u64().unwrap_or(0);
+    let (state, app, level) = {
+        let sh = shared.lock().unwrap();
+        match sh.config.rules.iter().find(|r| r.id == id) {
+            None => (State::SetUp, String::new(), 0.0),
+            Some(r) => {
+                let state = if !r.enabled {
+                    State::Off
+                } else if sh.live.active_rules.contains(&id) {
+                    State::Ducking
+                } else {
+                    State::Listening
+                };
+                (state, r.sources.first().cloned().unwrap_or_default(), r.level)
+            }
+        }
     };
-    let image = format!("data:image/png;base64,{}", base64(&icon::png(color, 144)));
-    send(ws, json!({ "event": "setImage", "context": ctx, "payload": { "image": image, "target": 0 } }));
-    send(ws, json!({ "event": "setTitle", "context": ctx, "payload": { "title": title, "target": 0 } }));
-}
-
-fn pretty(app: &str) -> String {
-    let s = app.strip_suffix(".exe").unwrap_or(app);
-    let mut c = s.chars();
-    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
-}
-
-/// State and title of a key.
-fn look(shared: &SharedRef, id: Key) -> (State, String) {
-    let sh = shared.lock().unwrap();
-    let Some(rule) = sh.config.rules.iter().find(|r| r.id == id) else { return (State::Paused, "Set up".into()) };
-    let title = rule.sources.iter().map(|a| pretty(a)).collect::<Vec<_>>().join("\n"); // the rule's trigger apps
-    let state = if !rule.enabled {
-        State::Paused
-    } else if sh.live.active_rules.contains(&id) {
-        State::Ducking
-    } else {
-        State::Active
-    };
-    (state, title)
+    key_image(icons, settings, state, &app, level)
 }
 
 fn set_config(shared: &SharedRef, change: impl FnOnce(&mut Config)) {
@@ -101,7 +83,8 @@ pub fn run(a: Args, shared: &SharedRef) {
     let Ok((mut ws, _)) = tungstenite::client(format!("ws://127.0.0.1:{}", a.port), stream) else { return };
     send(&mut ws, json!({ "event": a.event, "uuid": a.uuid }));
 
-    let mut keys: HashMap<String, (Key, (State, String))> = HashMap::new(); // visible keys -> what they control, what they show
+    let mut keys: HashMap<String, (Value, String)> = HashMap::new(); // visible keys -> settings, image shown
+    let mut icons = Icons::default();
     let mut inspector: Option<(String, String)> = None; // (action, context) of the open property inspector
     let mut sent_rev = None; // config revision the open inspector has
     loop {
@@ -112,16 +95,15 @@ pub fn run(a: Args, shared: &SharedRef) {
                 let action = v["action"].as_str().unwrap_or_default().to_string();
                 match v["event"].as_str().unwrap_or_default() {
                     "willAppear" | "didReceiveSettings" => {
-                        let key = v["payload"]["settings"]["rule"].as_u64().unwrap_or(0);
-                        let shown = look(shared, key);
-                        show(&mut ws, &ctx, &shown);
-                        keys.insert(ctx, (key, shown));
+                        // Earlier versions titled the key; the image carries everything now.
+                        send(&mut ws, json!({ "event": "setTitle", "context": ctx, "payload": { "title": "", "target": 0 } }));
+                        keys.insert(ctx, (v["payload"]["settings"].clone(), String::new()));
                     }
                     "willDisappear" => {
                         keys.remove(&ctx);
                     }
                     "keyUp" => {
-                        let id = keys.get(&ctx).map_or(0, |k| k.0);
+                        let id = keys.get(&ctx).and_then(|k| k.0["rule"].as_u64()).unwrap_or(0);
                         let mut found = false;
                         set_config(shared, |c| {
                             if let Some(r) = c.rules.iter_mut().find(|r| r.id == id) {
@@ -158,10 +140,10 @@ pub fn run(a: Args, shared: &SharedRef) {
             Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
             Err(_) => return, // Stream Deck closed the connection
         }
-        for (ctx, (key, shown)) in keys.iter_mut() {
-            let now = look(shared, *key);
+        for (ctx, (settings, shown)) in keys.iter_mut() {
+            let now = image(shared, &mut icons, settings);
             if now != *shown {
-                show(&mut ws, ctx, &now);
+                send(&mut ws, json!({ "event": "setImage", "context": ctx, "payload": { "image": now, "target": 0 } }));
                 *shown = now;
             }
         }
