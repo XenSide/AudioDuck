@@ -1,6 +1,6 @@
 {
 	"Name": "AudioDuck",
-	"Version": "1.0.0.0",
+	"Version": "1.1.0.0",
 	"Author": "xenside",
 	"Description": "Per-app audio ducking: when one app plays (e.g. Discord), others get quieter. Runs while Stream Deck runs. The key pauses or resumes ducking and shows whether it is paused, active or ducking right now; its settings hold the rules, live levels and timings.",
 	"Category": "AudioDuck",
@@ -34,6 +34,22 @@
 				}
 			],
 			"PropertyInspectorPath": "ui/inspector.html"
+		},
+		{
+			"UUID": "com.xenside.audioduck.rule",
+			"Name": "Regola",
+			"Icon": "imgs/actions/toggle/icon",
+			"Tooltip": "Disable or re-enable one ducking rule.",
+			"Controllers": ["Keypad"],
+			"UserTitleEnabled": false,
+			"States": [
+				{
+					"Image": "imgs/actions/toggle/key",
+					"TitleAlignment": "bottom",
+					"FontSize": "12"
+				}
+			],
+			"PropertyInspectorPath": "ui/rule.html"
 		}
 	]
 }

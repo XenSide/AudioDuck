@@ -1,5 +1,8 @@
-//! Stream Deck (and OpenDeck) side. One key action: a tap pauses/resumes ducking, the image shows the state, and its
-//! property inspector edits the whole config and shows live levels.
+//! Stream Deck (and OpenDeck) side. Two key actions:
+//! - toggle: pauses/resumes all ducking; its property inspector edits the whole config and shows live levels.
+//! - rule: enables/disables one rule, picked in its property inspector (settings `{"rule": id}`).
+//! The key image shows the state either way.
+use std::collections::HashMap;
 use std::net::TcpStream;
 use std::time::Duration;
 
@@ -16,6 +19,9 @@ enum State {
     Active,
     Ducking,
 }
+
+/// What a visible key controls: None = all ducking, Some(id) = one rule (0 = none picked yet).
+type Key = Option<u64>;
 
 type Ws = WebSocket<TcpStream>;
 
@@ -50,20 +56,51 @@ fn send(ws: &mut Ws, v: Value) {
     let _ = ws.send(Message::text(v.to_string()));
 }
 
-fn show(ws: &mut Ws, ctx: &str, state: State) {
-    let (color, title) = match state {
-        State::Paused => (icon::OFF, "Pausa"),
-        State::Active => (icon::ACCENT, "Attivo"),
-        State::Ducking => (icon::DUCKING, "Abbassa"),
+fn show(ws: &mut Ws, ctx: &str, (state, title): &(State, String)) {
+    let color = match state {
+        State::Paused => icon::OFF,
+        State::Active => icon::ACCENT,
+        State::Ducking => icon::DUCKING,
     };
     let image = format!("data:image/png;base64,{}", base64(&icon::png(color, 144)));
     send(ws, json!({ "event": "setImage", "context": ctx, "payload": { "image": image, "target": 0 } }));
     send(ws, json!({ "event": "setTitle", "context": ctx, "payload": { "title": title, "target": 0 } }));
 }
 
-fn state(shared: &SharedRef) -> State {
+fn pretty(app: &str) -> String {
+    let s = app.strip_suffix(".exe").unwrap_or(app);
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
+/// State and title of a key.
+fn look(shared: &SharedRef, key: Key) -> (State, String) {
     let sh = shared.lock().unwrap();
-    if !sh.config.enabled { State::Paused } else if sh.live.ducking { State::Ducking } else { State::Active }
+    let Some(id) = key else {
+        return match (sh.config.enabled, sh.live.ducking) {
+            (false, _) => (State::Paused, "Pausa".into()),
+            (true, true) => (State::Ducking, "Abbassa".into()),
+            (true, false) => (State::Active, "Attivo".into()),
+        };
+    };
+    let Some(rule) = sh.config.rules.iter().find(|r| r.id == id) else { return (State::Paused, "Regola?".into()) };
+    let title = rule.sources.iter().map(|a| pretty(a)).collect::<Vec<_>>().join("\n"); // the rule's trigger apps
+    let state = if !sh.config.enabled || !rule.enabled {
+        State::Paused
+    } else if sh.live.active_rules.contains(&id) {
+        State::Ducking
+    } else {
+        State::Active
+    };
+    (state, title)
+}
+
+fn set_config(shared: &SharedRef, change: impl FnOnce(&mut Config)) {
+    let mut sh = shared.lock().unwrap();
+    change(&mut sh.config);
+    sh.config.ensure_ids(); // rules new from the inspector have no id yet
+    sh.rev += 1;
+    save_config(&sh.config);
 }
 
 /// Talks to Stream Deck until it disconnects.
@@ -73,9 +110,8 @@ pub fn run(a: Args, shared: &SharedRef) {
     let Ok((mut ws, _)) = tungstenite::client(format!("ws://127.0.0.1:{}", a.port), stream) else { return };
     send(&mut ws, json!({ "event": a.event, "uuid": a.uuid }));
 
-    let mut keys: Vec<String> = vec![]; // contexts of visible keys
+    let mut keys: HashMap<String, (Key, (State, String))> = HashMap::new(); // visible keys -> what they control, what they show
     let mut inspector: Option<(String, String)> = None; // (action, context) of the open property inspector
-    let mut shown = state(shared);
     let mut sent_rev = None; // config revision the open inspector has
     loop {
         match ws.read() {
@@ -84,17 +120,31 @@ pub fn run(a: Args, shared: &SharedRef) {
                 let ctx = v["context"].as_str().unwrap_or_default().to_string();
                 let action = v["action"].as_str().unwrap_or_default().to_string();
                 match v["event"].as_str().unwrap_or_default() {
-                    "willAppear" => {
-                        show(&mut ws, &ctx, shown);
-                        keys.push(ctx);
+                    "willAppear" | "didReceiveSettings" => {
+                        let key = action.ends_with(".rule").then(|| v["payload"]["settings"]["rule"].as_u64().unwrap_or(0));
+                        let shown = look(shared, key);
+                        show(&mut ws, &ctx, &shown);
+                        keys.insert(ctx, (key, shown));
                     }
-                    "willDisappear" => keys.retain(|k| *k != ctx),
-                    "keyUp" => {
-                        let mut sh = shared.lock().unwrap();
-                        sh.config.enabled = !sh.config.enabled;
-                        sh.rev += 1;
-                        save_config(&sh.config);
+                    "willDisappear" => {
+                        keys.remove(&ctx);
                     }
+                    "keyUp" => match keys.get(&ctx).map(|k| k.0) {
+                        Some(None) => set_config(shared, |c| c.enabled = !c.enabled),
+                        Some(Some(id)) => {
+                            let mut found = false;
+                            set_config(shared, |c| {
+                                if let Some(r) = c.rules.iter_mut().find(|r| r.id == id) {
+                                    r.enabled = !r.enabled;
+                                    found = true;
+                                }
+                            });
+                            if !found {
+                                send(&mut ws, json!({ "event": "showAlert", "context": ctx }));
+                            }
+                        }
+                        None => {}
+                    },
                     "propertyInspectorDidAppear" => {
                         shared.lock().unwrap().inspector_open = true;
                         inspector = Some((action, ctx));
@@ -107,10 +157,7 @@ pub fn run(a: Args, shared: &SharedRef) {
                     "sendToPlugin" => {
                         // The inspector sends the whole config on every change, or {} when it loads and wants it.
                         if let Ok(config) = serde_json::from_value::<Config>(v["payload"]["config"].clone()) {
-                            let mut sh = shared.lock().unwrap();
-                            sh.config = config;
-                            sh.rev += 1;
-                            save_config(&sh.config);
+                            set_config(shared, |c| *c = config);
                         } else {
                             sent_rev = None;
                         }
@@ -123,11 +170,11 @@ pub fn run(a: Args, shared: &SharedRef) {
             Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
             Err(_) => return, // Stream Deck closed the connection
         }
-        let now = state(shared);
-        if now != shown {
-            shown = now;
-            for ctx in keys.clone() {
-                show(&mut ws, &ctx, shown);
+        for (ctx, (key, shown)) in keys.iter_mut() {
+            let now = look(shared, *key);
+            if now != *shown {
+                show(&mut ws, ctx, &now);
+                *shown = now;
             }
         }
         if let Some((action, ctx)) = &inspector {
@@ -137,7 +184,7 @@ pub fn run(a: Args, shared: &SharedRef) {
                 let sh = shared.lock().unwrap();
                 payload["live"] = serde_json::to_value(&sh.live).unwrap_or_default();
                 if sent_rev != Some(sh.rev) {
-                    sent_rev = Some(sh.rev); // config changed (here, by the key, or by the inspector itself): resend it
+                    sent_rev = Some(sh.rev); // config changed (here, by a key, or by the inspector itself): resend it
                     payload["config"] = serde_json::to_value(&sh.config).unwrap_or_default();
                 }
             }

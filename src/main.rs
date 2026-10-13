@@ -29,6 +29,17 @@ pub struct Config {
     pub rules: Vec<Rule>,
 }
 
+impl Config {
+    /// Gives every rule without one a fresh id.
+    pub fn ensure_ids(&mut self) {
+        let mut next = self.rules.iter().map(|r| r.id).max().unwrap_or(0);
+        for r in self.rules.iter_mut().filter(|r| r.id == 0) {
+            next += 1;
+            r.id = next;
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self { enabled: true, settings: Settings::default(), rules: vec![] }
@@ -42,6 +53,8 @@ pub struct Live {
     pub gains: HashMap<String, f32>,
     pub volumes: HashMap<String, f32>,
     pub ducking: bool,
+    /// Ids of the rules ducking right now.
+    pub active_rules: Vec<u64>,
 }
 
 pub struct Shared {
@@ -133,12 +146,16 @@ fn engine(shared: SharedRef) {
         }
         was_enabled = cfg.enabled;
         let ducking = cfg.enabled && ducker.gains.values().any(|&g| g < 0.999);
+        let active_rules = if cfg.enabled { cfg.rules.iter().zip(&ducker.active).filter(|&(_, &a)| a).map(|(r, _)| r.id).collect() } else { vec![] };
         let mut sh = shared.lock().unwrap();
         sh.live.ducking = ducking;
+        sh.live.active_rules = active_rules;
         if open {
             let mut list: Vec<_> = peaks.into_iter().collect();
             list.sort_by(|a, b| a.0.cmp(&b.0));
-            sh.live = Live { peaks: list, gains: ducker.gains.clone(), volumes: mixer.volumes(), ducking };
+            sh.live.peaks = list;
+            sh.live.gains = ducker.gains.clone();
+            sh.live.volumes = mixer.volumes();
         }
     }
 }
@@ -150,11 +167,25 @@ fn main() {
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
         return;
     }
-    let shared: SharedRef = Arc::new(Mutex::new(Shared { config: load_config(), rev: 0, live: Live::default(), inspector_open: false, quit: false }));
+    let mut config = load_config();
+    config.ensure_ids();
+    let shared: SharedRef = Arc::new(Mutex::new(Shared { config, rev: 0, live: Live::default(), inspector_open: false, quit: false }));
     let sd = shared.clone();
     std::thread::spawn(move || {
         streamdeck::run(plugin, &sd);
         sd.lock().unwrap().quit = true; // Stream Deck is gone: restore volumes and exit with it
     });
     engine(shared);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_ids_keeps_existing_and_numbers_new_ones_after_the_highest() {
+        let mut c = Config { rules: vec![Rule { id: 5, ..Default::default() }, Rule::default(), Rule::default()], ..Default::default() };
+        c.ensure_ids();
+        assert_eq!(c.rules.iter().map(|r| r.id).collect::<Vec<_>>(), [5, 6, 7]);
+    }
 }

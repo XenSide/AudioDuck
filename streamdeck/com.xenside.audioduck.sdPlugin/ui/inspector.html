@@ -179,7 +179,7 @@
 			if (!sources.length) ed.error = "Scegli almeno un'app che fa scattare il ducking.";
 			else if (!ed.all_others && !targets.length) ed.error = "Scegli almeno un'app da abbassare.";
 			else {
-				const rule = { sources, targets, all_others: ed.all_others, level: ed.level, enabled: ed.enabled };
+				const rule = { id: ed.index === null ? 0 : config.rules[ed.index].id, sources, targets, all_others: ed.all_others, level: ed.level, enabled: ed.enabled }; // the plugin gives new rules an id
 				if (ed.index === null) config.rules.push(rule); else config.rules[ed.index] = rule;
 				editing = null; renderEditor(); save(); return;
 			}
