@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-//! AudioDuck runs as a Stream Deck / OpenDeck plugin: no window, no tray. Everything is configured from the key's
-//! property inspector (streamdeck/…/ui/inspector.html).
+//! AudioDuck runs as a Stream Deck / OpenDeck plugin: no window, no tray. Each key is one rule, set up in that key's
+//! property inspector (streamdeck/…/ui/rule.html); tapping the key turns its rule off and on.
 mod audio;
 mod engine;
 mod icon;
@@ -24,7 +24,6 @@ const REFRESH: Duration = Duration::from_secs(1);
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub enabled: bool,
     pub settings: Settings,
     pub rules: Vec<Rule>,
 }
@@ -42,7 +41,7 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { enabled: true, settings: Settings::default(), rules: vec![] }
+        Self { settings: Settings::default(), rules: vec![] }
     }
 }
 
@@ -52,7 +51,6 @@ pub struct Live {
     pub peaks: Vec<(String, f32)>,
     pub gains: HashMap<String, f32>,
     pub volumes: HashMap<String, f32>,
-    pub ducking: bool,
     /// Ids of the rules ducking right now.
     pub active_rules: Vec<u64>,
 }
@@ -104,7 +102,6 @@ fn engine(shared: SharedRef) {
     let mut ducker = Ducker::default();
     let mut rev = u64::MAX;
     let (mut last_tick, mut last_refresh) = (Instant::now(), Instant::now() - REFRESH);
-    let mut was_enabled = false;
     let mut was_open = false;
 
     loop {
@@ -138,17 +135,9 @@ fn engine(shared: SharedRef) {
             mixer.refresh(|app| open || cfg.rules.iter().any(|r| r.enabled && r.sources.iter().any(|s| s == app)));
         }
         let peaks = mixer.peaks();
-        if cfg.enabled {
-            mixer.apply(ducker.step(&cfg.rules, &cfg.settings, &peaks, dt));
-        } else if was_enabled {
-            mixer.restore_all();
-            ducker.gains.clear();
-        }
-        was_enabled = cfg.enabled;
-        let ducking = cfg.enabled && ducker.gains.values().any(|&g| g < 0.999);
-        let active_rules = if cfg.enabled { cfg.rules.iter().zip(&ducker.active).filter(|&(_, &a)| a).map(|(r, _)| r.id).collect() } else { vec![] };
+        mixer.apply(ducker.step(&cfg.rules, &cfg.settings, &peaks, dt));
+        let active_rules = cfg.rules.iter().zip(&ducker.active).filter(|&(_, &a)| a).map(|(r, _)| r.id).collect();
         let mut sh = shared.lock().unwrap();
-        sh.live.ducking = ducking;
         sh.live.active_rules = active_rules;
         if open {
             let mut list: Vec<_> = peaks.into_iter().collect();

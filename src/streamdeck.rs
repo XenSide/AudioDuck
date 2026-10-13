@@ -1,7 +1,5 @@
-//! Stream Deck (and OpenDeck) side. Two key actions:
-//! - toggle: pauses/resumes all ducking; its property inspector edits the whole config and shows live levels.
-//! - rule: enables/disables one rule, picked in its property inspector (settings `{"rule": id}`).
-//! The key image shows the state either way.
+//! Stream Deck (and OpenDeck) side. One key action, one rule per key (settings `{"rule": id}`): a tap turns the rule off
+//! and on, the image shows its state, and the property inspector edits it (plus the shared timings) and shows live levels.
 use std::collections::HashMap;
 use std::net::TcpStream;
 use std::time::Duration;
@@ -20,8 +18,8 @@ enum State {
     Ducking,
 }
 
-/// What a visible key controls: None = all ducking, Some(id) = one rule (0 = none picked yet).
-type Key = Option<u64>;
+/// The rule a visible key controls (0 = not set up yet).
+type Key = u64;
 
 type Ws = WebSocket<TcpStream>;
 
@@ -74,18 +72,11 @@ fn pretty(app: &str) -> String {
 }
 
 /// State and title of a key.
-fn look(shared: &SharedRef, key: Key) -> (State, String) {
+fn look(shared: &SharedRef, id: Key) -> (State, String) {
     let sh = shared.lock().unwrap();
-    let Some(id) = key else {
-        return match (sh.config.enabled, sh.live.ducking) {
-            (false, _) => (State::Paused, "Pausa".into()),
-            (true, true) => (State::Ducking, "Abbassa".into()),
-            (true, false) => (State::Active, "Attivo".into()),
-        };
-    };
-    let Some(rule) = sh.config.rules.iter().find(|r| r.id == id) else { return (State::Paused, "Regola?".into()) };
+    let Some(rule) = sh.config.rules.iter().find(|r| r.id == id) else { return (State::Paused, "Configura".into()) };
     let title = rule.sources.iter().map(|a| pretty(a)).collect::<Vec<_>>().join("\n"); // the rule's trigger apps
-    let state = if !sh.config.enabled || !rule.enabled {
+    let state = if !rule.enabled {
         State::Paused
     } else if sh.live.active_rules.contains(&id) {
         State::Ducking
@@ -121,7 +112,7 @@ pub fn run(a: Args, shared: &SharedRef) {
                 let action = v["action"].as_str().unwrap_or_default().to_string();
                 match v["event"].as_str().unwrap_or_default() {
                     "willAppear" | "didReceiveSettings" => {
-                        let key = action.ends_with(".rule").then(|| v["payload"]["settings"]["rule"].as_u64().unwrap_or(0));
+                        let key = v["payload"]["settings"]["rule"].as_u64().unwrap_or(0);
                         let shown = look(shared, key);
                         show(&mut ws, &ctx, &shown);
                         keys.insert(ctx, (key, shown));
@@ -129,22 +120,19 @@ pub fn run(a: Args, shared: &SharedRef) {
                     "willDisappear" => {
                         keys.remove(&ctx);
                     }
-                    "keyUp" => match keys.get(&ctx).map(|k| k.0) {
-                        Some(None) => set_config(shared, |c| c.enabled = !c.enabled),
-                        Some(Some(id)) => {
-                            let mut found = false;
-                            set_config(shared, |c| {
-                                if let Some(r) = c.rules.iter_mut().find(|r| r.id == id) {
-                                    r.enabled = !r.enabled;
-                                    found = true;
-                                }
-                            });
-                            if !found {
-                                send(&mut ws, json!({ "event": "showAlert", "context": ctx }));
+                    "keyUp" => {
+                        let id = keys.get(&ctx).map_or(0, |k| k.0);
+                        let mut found = false;
+                        set_config(shared, |c| {
+                            if let Some(r) = c.rules.iter_mut().find(|r| r.id == id) {
+                                r.enabled = !r.enabled;
+                                found = true;
                             }
+                        });
+                        if !found {
+                            send(&mut ws, json!({ "event": "showAlert", "context": ctx })); // not set up yet
                         }
-                        None => {}
-                    },
+                    }
                     "propertyInspectorDidAppear" => {
                         shared.lock().unwrap().inspector_open = true;
                         inspector = Some((action, ctx));

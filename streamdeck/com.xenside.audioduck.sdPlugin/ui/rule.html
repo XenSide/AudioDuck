@@ -3,23 +3,59 @@
 <head>
 <meta charset="utf-8" />
 <style>
-	:root { --bg: #2d2d2d; --input: #3d3d3d; --line: #4a4a4a; --text: #d8d8d8; --muted: #969696; }
+	:root { --bg: #2d2d2d; --row: #3a3a3a; --input: #3d3d3d; --line: #4a4a4a; --text: #d8d8d8; --muted: #969696; --accent: #7c9cff; --duck: #ffb454; }
 	* { box-sizing: border-box; }
 	body { margin: 0; padding: 10px 12px 16px; background: var(--bg); color: var(--text); font: 9pt -apple-system, "Segoe UI", sans-serif; }
+	h2 { font-size: 9pt; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin: 16px 0 6px; }
+	button { background: var(--input); color: var(--text); border: 1px solid #5a5a5a; border-radius: 3px; padding: 3px 9px; font: inherit; cursor: pointer; }
+	button.primary { background: var(--accent); color: #15161b; border-color: var(--accent); font-weight: 600; }
+	select, input[type=text], input[type=number] { background: var(--input); color: var(--text); border: 1px solid var(--line); border-radius: 3px; padding: 3px 6px; font: inherit; }
+	select { flex: 1; min-width: 0; }
+	input[type=range] { accent-color: var(--accent); flex: 1; }
+	input[type=checkbox] { accent-color: var(--accent); margin: 0 6px 0 0; }
+	label { display: flex; align-items: center; }
 	.line { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
-	.line > span { flex: 0 0 60px; color: var(--muted); }
-	select { flex: 1; min-width: 0; background: var(--input); color: var(--text); border: 1px solid var(--line); border-radius: 3px; padding: 3px 6px; font: inherit; }
+	.line > .k { flex: 0 0 120px; color: var(--muted); }
+	.status { font-size: 11pt; font-weight: 600; }
 	.muted { color: var(--muted); }
+	.cols { display: flex; gap: 8px; }
+	.cols > div { flex: 1; min-width: 0; }
+	.list { background: var(--row); border-radius: 3px; padding: 4px 6px; max-height: 160px; overflow-y: auto; }
+	.list label { margin: 3px 0; overflow-wrap: anywhere; }
+	.error { color: var(--duck); }
+	.app { display: grid; grid-template-columns: 90px 1fr 70px; align-items: center; gap: 8px; margin: 5px 0; }
+	.app .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.bar { height: 6px; background: var(--input); border-radius: 3px; overflow: hidden; }
+	.bar > div { height: 100%; background: var(--accent); }
+	.bar.loud > div { background: var(--duck); }
+	.vol { text-align: right; color: var(--muted); }
+	.vol.down { color: var(--duck); }
 </style>
 </head>
 <body>
-	<div class="line"><span>Regola</span><select id="rule"><option value="0">…</option></select></div>
-	<p class="muted">Premendo il tasto la regola si disattiva o si riattiva. Le regole si creano e si modificano dal tasto Ducking.</p>
+	<div class="status" id="status">…</div>
+	<div class="line"><span class="k">Regola del tasto</span><select id="pick"></select></div>
+
+	<div id="editor"></div>
+
+	<h2>App in riproduzione</h2>
+	<div id="apps" class="muted">Nessuna app sta usando l'audio.</div>
+
+	<h2>Impostazioni (valgono per tutti i tasti)</h2>
+	<div class="line" title="Le barre diventano arancioni sopra la soglia">
+		<span class="k">Soglia attivazione</span><input type="range" id="threshold" min="1" max="30" /><span id="thresholdPct"></span>
+	</div>
+	<div class="line"><span class="k">Discesa</span><input type="number" id="attack_ms" min="0" max="5000" step="10" /> ms</div>
+	<div class="line"><span class="k">Attesa prima di risalire</span><input type="number" id="hold_ms" min="0" max="5000" step="10" /> ms</div>
+	<div class="line"><span class="k">Risalita</span><input type="number" id="release_ms" min="0" max="5000" step="10" /> ms</div>
 
 <script>
-	let ws, uuid, settings = {};
+	let ws, uuid, settings = {}, config = null, live = { peaks: [], gains: {}, volumes: {}, active_rules: [] };
+	let draft = null, draftFor = undefined; // editor state, rebuilt only when the key's rule changes
+	const $ = (id) => document.getElementById(id);
+	const el = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids); return e; };
 	const pretty = (app) => { const s = app.replace(/\.exe$/, ''); return s.charAt(0).toUpperCase() + s.slice(1); };
-	const select = document.getElementById('rule');
+	const ruleOf = () => config && config.rules.find((r) => r.id === settings.rule);
 
 	window.connectElgatoStreamDeckSocket = (port, inUUID, registerEvent, info, actionInfo) => {
 		uuid = inUUID;
@@ -27,29 +63,153 @@
 		ws = new WebSocket('ws://127.0.0.1:' + port);
 		ws.onopen = () => {
 			ws.send(JSON.stringify({ event: registerEvent, uuid }));
-			ws.send(JSON.stringify({ event: 'sendToPlugin', context: uuid, payload: {} })); // ask for the rules
+			send('sendToPlugin', {}); // ask for the config
 		};
 		ws.onmessage = (e) => {
 			const m = JSON.parse(e.data);
-			if (m.event === 'sendToPropertyInspector' && m.payload.config) render(m.payload.config.rules);
+			if (m.event !== 'sendToPropertyInspector') return;
+			if (m.payload.config) { config = m.payload.config; renderConfig(); }
+			if (m.payload.live) { live = m.payload.live; renderLive(); }
 		};
 	};
 
-	function render(rules) {
-		const opts = rules.map((r) => {
-			const listed = r.targets.map(pretty).join(', ');
-			const targets = r.all_others ? (listed ? 'tutte tranne ' + listed : 'tutte le altre') : listed;
-			return new Option(r.sources.map(pretty).join(', ') + ' → ' + targets + ' (' + Math.round(r.level * 100) + '%)', r.id);
-		});
-		if (!rules.some((r) => r.id === settings.rule)) opts.unshift(new Option(rules.length ? '— scegli una regola —' : 'Nessuna regola: creala dal tasto Ducking', 0));
-		select.replaceChildren(...opts);
-		select.value = settings.rule || 0;
+	function send(event, payload) {
+		if (ws && ws.readyState === 1) ws.send(JSON.stringify({ event, context: uuid, payload }));
 	}
 
-	select.onchange = () => {
-		settings = { rule: Number(select.value) };
-		ws.send(JSON.stringify({ event: 'setSettings', context: uuid, payload: settings }));
-	};
+	function save() { send('sendToPlugin', { config }); }
+
+	function setRule(id) {
+		settings = { rule: id };
+		send('setSettings', settings);
+		renderConfig();
+	}
+
+	function summary(r) {
+		const listed = r.targets.map(pretty).join(', ');
+		const targets = r.all_others ? (listed ? 'tutte tranne ' + listed : 'tutte le altre') : listed;
+		return r.sources.map(pretty).join(', ') + ' → ' + targets + ' (' + Math.round(r.level * 100) + '%)';
+	}
+
+	function renderConfig() {
+		if (!config) return;
+		const s = config.settings;
+		$('threshold').value = Math.round(s.threshold * 100);
+		$('thresholdPct').textContent = Math.round(s.threshold * 100) + '%';
+		for (const k of ['attack_ms', 'hold_ms', 'release_ms']) if (document.activeElement !== $(k)) $(k).value = s[k];
+
+		const current = ruleOf();
+		$('pick').replaceChildren(el('option', { value: 'new', textContent: '+ Nuova regola' }), ...config.rules.map((r) => el('option', { value: r.id, textContent: summary(r) })));
+		$('pick').value = current ? current.id : 'new';
+		if (draftFor !== (current ? current.id : 0)) openEditor(current);
+		renderStatus();
+	}
+
+	function renderStatus() {
+		const r = ruleOf(), st = $('status');
+		const ducking = r && r.enabled && live.active_rules.includes(r.id);
+		st.textContent = !r ? 'Nuova regola: scegli le app e salva' : !r.enabled ? 'Regola disattivata (premi il tasto per riattivarla)' : ducking ? 'Sta abbassando il volume…' : 'Regola attiva, in ascolto';
+		st.style.color = ducking ? 'var(--duck)' : '';
+	}
+
+	function renderLive() {
+		renderStatus();
+		// Apps that started playing after the editor opened become pickable (unchecked).
+		const fresh = draft ? live.peaks.map(([a]) => a).filter((a) => !draft.sources.some(([s]) => s === a)) : [];
+		if (fresh.length) {
+			for (const l of [draft.sources, draft.targets]) { l.push(...fresh.map((a) => [a, false])); l.sort((x, y) => x[0].localeCompare(y[0])); }
+			renderEditor();
+		}
+		const apps = $('apps');
+		if (!live.peaks.length) { apps.className = 'muted'; apps.textContent = "Nessuna app sta usando l'audio."; return; }
+		apps.className = '';
+		apps.replaceChildren(...live.peaks.map(([app, peak]) => {
+			const g = live.gains[app] ?? 1;
+			const v = live.volumes[app];
+			const vol = v === undefined ? '' : 'vol ' + Math.round(v * g * 100) + '%';
+			const loud = config && peak > config.settings.threshold;
+			return el('div', { className: 'app' },
+				el('span', { className: 'name', textContent: pretty(app), title: app }),
+				el('div', { className: 'bar' + (loud ? ' loud' : '') }, el('div', { style: 'width:' + Math.min(100, peak * 100) + '%' })),
+				el('span', { className: 'vol' + (g < 0.999 ? ' down' : ''), textContent: g < 0.999 ? '↓ ' + vol : vol }));
+		}));
+	}
+
+	function openEditor(rule) {
+		const r = rule || { id: 0, sources: [], targets: [], all_others: false, level: 0.2, enabled: true };
+		const apps = [...new Set([...live.peaks.map(([a]) => a), ...r.sources, ...r.targets])].sort();
+		draftFor = r.id;
+		draft = { id: r.id, enabled: r.enabled, all_others: r.all_others, level: r.level, error: '', saved: false,
+			sources: apps.map((a) => [a, r.sources.includes(a)]), targets: apps.map((a) => [a, r.targets.includes(a)]) };
+		renderEditor();
+	}
+
+	function renderEditor() {
+		const ed = draft;
+		const list = (items) => el('div', { className: 'list' }, ...items.map((it) => {
+			const c = el('input', { type: 'checkbox', checked: it[1] });
+			c.onchange = () => { it[1] = c.checked; ed.saved = false; renderEditor(); };
+			return el('label', {}, c, it[0]);
+		}));
+		const others = el('input', { type: 'checkbox', checked: ed.all_others });
+		others.onchange = () => { ed.all_others = others.checked; ed.saved = false; renderEditor(); };
+		const manual = el('input', { type: 'text', placeholder: 'App non in riproduzione, es. spotify.exe', style: 'flex:1;min-width:0' });
+		const addManual = () => {
+			let app = manual.value.trim().toLowerCase();
+			if (!app) return;
+			if (!app.endsWith('.exe')) app += '.exe';
+			for (const l of [ed.sources, ed.targets]) if (!l.some(([a]) => a === app)) l.push([app, false]);
+			renderEditor();
+		};
+		manual.onkeydown = (e) => { if (e.key === 'Enter') addManual(); };
+		const level = el('input', { type: 'range', min: 0, max: 100, value: Math.round(ed.level * 100) });
+		const pct = el('span', { textContent: Math.round(ed.level * 100) + '%' });
+		level.oninput = () => { ed.level = level.value / 100; ed.saved = false; pct.textContent = level.value + '%'; };
+		const ok = el('button', { className: 'primary', textContent: ed.id ? 'Salva' : 'Crea regola' });
+		ok.onclick = () => {
+			const picked = (l) => l.filter(([, c]) => c).map(([a]) => a);
+			const sources = picked(ed.sources), targets = picked(ed.targets);
+			if (!sources.length) ed.error = "Scegli almeno un'app che fa scattare il ducking.";
+			else if (!ed.all_others && !targets.length) ed.error = "Scegli almeno un'app da abbassare.";
+			else {
+				ed.error = '';
+				const isNew = !ed.id;
+				if (isNew) ed.id = config.rules.reduce((m, r) => Math.max(m, r.id), 0) + 1;
+				const rule = { id: ed.id, sources, targets, all_others: ed.all_others, level: ed.level, enabled: isNew || ruleOf()?.enabled !== false }; // on/off belongs to the key
+				const i = config.rules.findIndex((r) => r.id === ed.id);
+				if (i < 0) config.rules.push(rule); else config.rules[i] = rule;
+				draftFor = ed.id;
+				ed.saved = true;
+				save();
+				if (isNew) setRule(ed.id); else renderConfig();
+			}
+			renderEditor();
+		};
+		const del = el('button', { textContent: 'Elimina regola' });
+		del.onclick = () => {
+			config.rules = config.rules.filter((r) => r.id !== ed.id);
+			save();
+			setRule(0);
+		};
+		$('editor').replaceChildren(
+			el('div', { className: 'cols' },
+				el('div', {}, el('div', { className: 'muted', textContent: 'Quando suona…' }), list(ed.sources)),
+				el('div', {}, el('div', { className: 'muted', textContent: ed.all_others ? '…tranne queste' : '…abbassa' }), list(ed.targets))),
+			el('label', { style: 'margin-top:6px' }, others, 'Abbassa tutte le altre app'),
+			el('div', { className: 'line' }, manual, el('button', { textContent: 'Aggiungi', onclick: addManual })),
+			el('div', { className: 'line' }, el('span', { className: 'k', textContent: 'Volume durante il ducking' }), level, pct),
+			ed.error ? el('div', { className: 'error', textContent: ed.error }) : '',
+			el('div', { className: 'line', style: 'justify-content:flex-end' },
+				ed.saved ? el('span', { className: 'muted', textContent: 'Salvata' }) : '',
+				ed.id ? del : '', ok));
+	}
+
+	$('pick').onchange = () => setRule($('pick').value === 'new' ? 0 : Number($('pick').value));
+	$('threshold').oninput = () => { config.settings.threshold = $('threshold').value / 100; $('thresholdPct').textContent = $('threshold').value + '%'; };
+	$('threshold').onchange = save;
+	for (const k of ['attack_ms', 'hold_ms', 'release_ms']) {
+		$(k).onchange = () => { config.settings[k] = Math.max(0, Math.min(5000, parseInt($(k).value) || 0)); save(); };
+	}
 </script>
 </body>
 </html>
