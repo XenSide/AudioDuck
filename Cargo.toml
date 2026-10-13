@@ -4,9 +4,6 @@ version = "0.2.0"
 edition = "2024"
 
 [dependencies]
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow"] }
-tray-icon = "0.26"
-raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 png = "0.18"
@@ -14,7 +11,6 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 windows-core = "0.62"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
-    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
@@ -23,7 +19,6 @@ windows = { version = "0.62", features = [
     "Win32_System_Variant",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
-    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [profile.release]

@@ -1,17 +1,21 @@
-//! Stream Deck (and OpenDeck) plugin side: AudioDuck runs as the plugin. One key pauses/resumes ducking and shows the state.
-//! Tap: toggle ducking. Hold: open the window.
-use std::collections::HashMap;
+//! Stream Deck (and OpenDeck) side. One key action: a tap pauses/resumes ducking, the image shows the state, and its
+//! property inspector edits the whole config and shows live levels.
 use std::net::TcpStream;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tungstenite::{Message, WebSocket};
 
-use crate::{control, icon};
+use crate::{Config, SharedRef, icon, save_config};
 
 const POLL: Duration = Duration::from_millis(250);
-const HOLD: Duration = Duration::from_millis(500);
-const OFFLINE: [u8; 3] = [45, 48, 58];
+
+#[derive(Clone, Copy, PartialEq)]
+enum State {
+    Paused,
+    Active,
+    Ducking,
+}
 
 type Ws = WebSocket<TcpStream>;
 
@@ -46,47 +50,69 @@ fn send(ws: &mut Ws, v: Value) {
     let _ = ws.send(Message::text(v.to_string()));
 }
 
-fn show(ws: &mut Ws, ctx: &str, state: isize) {
+fn show(ws: &mut Ws, ctx: &str, state: State) {
     let (color, title) = match state {
-        control::PAUSED => (icon::OFF, "Pausa"),
-        control::ACTIVE => (icon::ACCENT, "Attivo"),
-        control::DUCKING => (icon::DUCKING, "Abbassa"),
-        _ => (OFFLINE, "Spento"),
+        State::Paused => (icon::OFF, "Pausa"),
+        State::Active => (icon::ACCENT, "Attivo"),
+        State::Ducking => (icon::DUCKING, "Abbassa"),
     };
     let image = format!("data:image/png;base64,{}", base64(&icon::png(color, 144)));
     send(ws, json!({ "event": "setImage", "context": ctx, "payload": { "image": image, "target": 0 } }));
     send(ws, json!({ "event": "setTitle", "context": ctx, "payload": { "title": title, "target": 0 } }));
 }
 
-/// Talks to Stream Deck until it disconnects. `send_cmd(cmd)` runs a control command and returns the state (0 = no AudioDuck).
-pub fn run(a: Args, send_cmd: impl Fn(usize) -> isize) {
+fn state(shared: &SharedRef) -> State {
+    let sh = shared.lock().unwrap();
+    if !sh.config.enabled { State::Paused } else if sh.live.ducking { State::Ducking } else { State::Active }
+}
+
+/// Talks to Stream Deck until it disconnects.
+pub fn run(a: Args, shared: &SharedRef) {
     let Ok(stream) = TcpStream::connect(("127.0.0.1", a.port)) else { return };
     let _ = stream.set_read_timeout(Some(POLL)); // the read timeout is the poll tick
     let Ok((mut ws, _)) = tungstenite::client(format!("ws://127.0.0.1:{}", a.port), stream) else { return };
     send(&mut ws, json!({ "event": a.event, "uuid": a.uuid }));
 
-    let mut keys: HashMap<String, Option<Instant>> = HashMap::new(); // visible keys -> when pressed
-    let mut state = send_cmd(control::QUERY);
+    let mut keys: Vec<String> = vec![]; // contexts of visible keys
+    let mut inspector: Option<(String, String)> = None; // (action, context) of the open property inspector
+    let mut shown = state(shared);
+    let mut sent_rev = None; // config revision the open inspector has
     loop {
         match ws.read() {
             Ok(Message::Text(t)) => {
                 let Ok(v) = serde_json::from_str::<Value>(&t) else { continue };
                 let ctx = v["context"].as_str().unwrap_or_default().to_string();
+                let action = v["action"].as_str().unwrap_or_default().to_string();
                 match v["event"].as_str().unwrap_or_default() {
                     "willAppear" => {
-                        show(&mut ws, &ctx, state);
-                        keys.insert(ctx, None);
+                        show(&mut ws, &ctx, shown);
+                        keys.push(ctx);
                     }
-                    "willDisappear" => {
-                        keys.remove(&ctx);
-                    }
-                    "keyDown" => {
-                        keys.insert(ctx, Some(Instant::now()));
-                    }
+                    "willDisappear" => keys.retain(|k| *k != ctx),
                     "keyUp" => {
-                        let held = keys.get_mut(&ctx).and_then(Option::take).is_some_and(|t| t.elapsed() >= HOLD);
-                        if send_cmd(if held { control::OPEN } else { control::TOGGLE }) == 0 {
-                            send(&mut ws, json!({ "event": "showAlert", "context": ctx }));
+                        let mut sh = shared.lock().unwrap();
+                        sh.config.enabled = !sh.config.enabled;
+                        sh.rev += 1;
+                        save_config(&sh.config);
+                    }
+                    "propertyInspectorDidAppear" => {
+                        shared.lock().unwrap().inspector_open = true;
+                        inspector = Some((action, ctx));
+                        sent_rev = None;
+                    }
+                    "propertyInspectorDidDisappear" => {
+                        shared.lock().unwrap().inspector_open = false;
+                        inspector = None;
+                    }
+                    "sendToPlugin" => {
+                        // The inspector sends the whole config on every change, or {} when it loads and wants it.
+                        if let Ok(config) = serde_json::from_value::<Config>(v["payload"]["config"].clone()) {
+                            let mut sh = shared.lock().unwrap();
+                            sh.config = config;
+                            sh.rev += 1;
+                            save_config(&sh.config);
+                        } else {
+                            sent_rev = None;
                         }
                     }
                     _ => {}
@@ -97,12 +123,25 @@ pub fn run(a: Args, send_cmd: impl Fn(usize) -> isize) {
             Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
             Err(_) => return, // Stream Deck closed the connection
         }
-        let now = send_cmd(control::QUERY);
-        if now != state {
-            state = now;
-            for ctx in keys.keys().cloned().collect::<Vec<_>>() {
-                show(&mut ws, &ctx, state);
+        let now = state(shared);
+        if now != shown {
+            shown = now;
+            for ctx in keys.clone() {
+                show(&mut ws, &ctx, shown);
             }
+        }
+        if let Some((action, ctx)) = &inspector {
+            let (action, ctx) = (action.clone(), ctx.clone());
+            let mut payload = json!({});
+            {
+                let sh = shared.lock().unwrap();
+                payload["live"] = serde_json::to_value(&sh.live).unwrap_or_default();
+                if sent_rev != Some(sh.rev) {
+                    sent_rev = Some(sh.rev); // config changed (here, by the key, or by the inspector itself): resend it
+                    payload["config"] = serde_json::to_value(&sh.config).unwrap_or_default();
+                }
+            }
+            send(&mut ws, json!({ "event": "sendToPropertyInspector", "action": action, "context": ctx, "payload": payload }));
         }
     }
 }
