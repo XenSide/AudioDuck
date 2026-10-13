@@ -2,12 +2,12 @@
 	"Name": "AudioDuck",
 	"Version": "1.0.0.0",
 	"Author": "xenside",
-	"Description": "Pause or resume AudioDuck's ducking from a key, which shows whether it is paused, active or ducking right now. Hold the key to open AudioDuck. If AudioDuck isn't running, a tap starts it.",
+	"Description": "AudioDuck runs as this plugin: per-app ducking while Stream Deck runs. The key pauses or resumes ducking and shows whether it is paused, active or ducking right now. Hold it to open the AudioDuck window with the rules.",
 	"Category": "AudioDuck",
 	"CategoryIcon": "imgs/plugin/icon",
 	"Icon": "imgs/plugin/icon",
 	"SDKVersion": 2,
-	"CodePath": "bin/audioduck-streamdeck.exe",
+	"CodePath": "bin/audioduck.exe",
 	"Software": {
 		"MinimumVersion": "6.5"
 	},

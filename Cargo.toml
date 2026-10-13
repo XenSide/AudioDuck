@@ -26,14 +26,6 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-[[bin]]
-name = "audioduck"
-path = "src/main.rs"
-
-[[bin]]
-name = "audioduck-streamdeck"
-path = "src/streamdeck.rs"
-
 [profile.release]
 opt-level = 3
 lto = true

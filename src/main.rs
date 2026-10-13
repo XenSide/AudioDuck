@@ -2,6 +2,7 @@
 mod audio;
 mod control;
 mod engine;
+mod streamdeck;
 mod icon;
 mod ui;
 
@@ -164,6 +165,10 @@ fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
         match control::REQUEST.swap(control::QUERY, std::sync::atomic::Ordering::SeqCst) {
             control::TOGGLE => set_enabled(&|on| !on),
             control::OPEN => show(&shared),
+            control::QUIT => {
+                mixer.restore_all();
+                std::process::exit(0);
+            }
             _ => {}
         }
 
@@ -220,20 +225,20 @@ fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
 }
 
 fn main() -> eframe::Result {
+    let plugin = streamdeck::Args::parse(); // started by Stream Deck / OpenDeck
     // Two instances would each take the other's ducked volume as the user's and push it down for good.
     let _single = unsafe { CreateMutexW(None, false, w!("AudioDuck.SingleInstance")) };
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        if let Some(a) = plugin {
+            streamdeck::run(a, control::send); // AudioDuck already runs on its own: be its remote
+            return Ok(());
+        }
         if let Ok(h) = unsafe { FindWindowW(w!("Window Class"), w!("AudioDuck")) } {
             show_window(h.0 as isize);
         }
         return Ok(());
     }
-    // Lets the Stream Deck plugin start AudioDuck when it isn't running.
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = std::fs::create_dir_all(app_dir());
-        let _ = std::fs::write(app_dir().join("exe_path"), exe.to_string_lossy().as_bytes());
-    }
-    let start_hidden = std::env::args().any(|a| a == "--tray");
+    let start_hidden = plugin.is_some() || std::env::args().any(|a| a == "--tray");
     let shared: SharedRef = Arc::new(Mutex::new(Shared { config: load_config(), rev: 0, live: Live::default(), hwnd: 0 }));
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -251,6 +256,12 @@ fn main() -> eframe::Result {
             let app = ui::App::new(cc, shared.clone(), start_hidden);
             let ctx = cc.egui_ctx.clone();
             std::thread::spawn(move || engine_thread(shared, ctx));
+            if let Some(a) = plugin {
+                std::thread::spawn(move || {
+                    streamdeck::run(a, control::handle);
+                    control::handle(control::QUIT); // Stream Deck is gone: restore volumes and exit with it
+                });
+            }
             Ok(Box::new(app))
         }),
     )

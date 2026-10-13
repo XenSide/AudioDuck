@@ -5,9 +5,10 @@ $plugin = Join-Path $PSScriptRoot 'com.xenside.audioduck.sdPlugin'
 cargo build --release --manifest-path (Join-Path $root 'Cargo.toml')
 New-Item -ItemType Directory -Force (Join-Path $plugin 'bin') | Out-Null
 $sd = Get-Process StreamDeck -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Path
-Get-Process StreamDeck, audioduck-streamdeck -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process StreamDeck -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process audioduck -ErrorAction SilentlyContinue | Where-Object Path -like "*lgato*" | Stop-Process -Force # the plugin copy, so its exe can be replaced
 Start-Sleep -Seconds 1
-Copy-Item (Join-Path $root 'target\release\audioduck-streamdeck.exe') (Join-Path $plugin 'bin') -Force
+Copy-Item (Join-Path $root 'target\release\audioduck.exe') (Join-Path $plugin 'bin') -Force
 $dest = Join-Path $env:APPDATA 'Elgato\StreamDeck\Plugins\com.xenside.audioduck.sdPlugin'
 if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
 Copy-Item $plugin $dest -Recurse

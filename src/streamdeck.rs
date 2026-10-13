@@ -1,24 +1,34 @@
-//! Stream Deck (and OpenDeck) plugin: one key that pauses/resumes AudioDuck and shows its state.
-//! Tap: toggle ducking. Hold: open the AudioDuck window. AudioDuck not running: tap starts it.
-#![windows_subsystem = "windows"]
-#[path = "control.rs"]
-mod control;
-#[path = "icon.rs"]
-mod icon;
-
+//! Stream Deck (and OpenDeck) plugin side: AudioDuck runs as the plugin. One key pauses/resumes ducking and shows the state.
+//! Tap: toggle ducking. Hold: open the window.
 use std::collections::HashMap;
 use std::net::TcpStream;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tungstenite::{Message, WebSocket};
+
+use crate::{control, icon};
 
 const POLL: Duration = Duration::from_millis(250);
 const HOLD: Duration = Duration::from_millis(500);
 const OFFLINE: [u8; 3] = [45, 48, 58];
 
 type Ws = WebSocket<TcpStream>;
+
+/// What Stream Deck passes on the command line.
+pub struct Args {
+    port: u16,
+    uuid: String,
+    event: String,
+}
+
+impl Args {
+    pub fn parse() -> Option<Self> {
+        let args: Vec<String> = std::env::args().collect();
+        let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
+        Some(Self { port: arg("-port")?.parse().ok()?, uuid: arg("-pluginUUID")?, event: arg("-registerEvent")? })
+    }
+}
 
 fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -32,53 +42,31 @@ fn base64(data: &[u8]) -> String {
     out
 }
 
-/// Key image and title for a state (0 = AudioDuck not running).
-fn look(state: isize) -> (String, &'static str) {
+fn send(ws: &mut Ws, v: Value) {
+    let _ = ws.send(Message::text(v.to_string()));
+}
+
+fn show(ws: &mut Ws, ctx: &str, state: isize) {
     let (color, title) = match state {
         control::PAUSED => (icon::OFF, "Pausa"),
         control::ACTIVE => (icon::ACCENT, "Attivo"),
         control::DUCKING => (icon::DUCKING, "Abbassa"),
         _ => (OFFLINE, "Spento"),
     };
-    (format!("data:image/png;base64,{}", base64(&icon::png(color, 144))), title)
-}
-
-fn send(ws: &mut Ws, v: Value) {
-    let _ = ws.send(Message::text(v.to_string()));
-}
-
-fn show(ws: &mut Ws, ctx: &str, state: isize) {
-    let (image, title) = look(state);
+    let image = format!("data:image/png;base64,{}", base64(&icon::png(color, 144)));
     send(ws, json!({ "event": "setImage", "context": ctx, "payload": { "image": image, "target": 0 } }));
     send(ws, json!({ "event": "setTitle", "context": ctx, "payload": { "title": title, "target": 0 } }));
 }
 
-/// AudioDuck writes its path at every start.
-fn launch() -> bool {
-    let Some(appdata) = std::env::var_os("APPDATA") else { return false };
-    let Ok(exe) = std::fs::read_to_string(PathBuf::from(appdata).join(r"AudioDuck\exe_path")) else { return false };
-    use std::os::windows::process::CommandExt;
-    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-    let cmd = || {
-        let mut c = std::process::Command::new(exe.trim());
-        c.arg("--tray");
-        c
-    };
-    // Break out of the host's job object so AudioDuck (and its volume restore on exit) outlives Stream Deck.
-    cmd().creation_flags(CREATE_BREAKAWAY_FROM_JOB).spawn().or_else(|_| cmd().spawn()).is_ok()
-}
-
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
-    let Ok(port) = arg("-port").parse::<u16>() else { return };
-    let Ok(stream) = TcpStream::connect(("127.0.0.1", port)) else { return };
+/// Talks to Stream Deck until it disconnects. `send_cmd(cmd)` runs a control command and returns the state (0 = no AudioDuck).
+pub fn run(a: Args, send_cmd: impl Fn(usize) -> isize) {
+    let Ok(stream) = TcpStream::connect(("127.0.0.1", a.port)) else { return };
     let _ = stream.set_read_timeout(Some(POLL)); // the read timeout is the poll tick
-    let Ok((mut ws, _)) = tungstenite::client(format!("ws://127.0.0.1:{port}"), stream) else { return };
-    send(&mut ws, json!({ "event": arg("-registerEvent"), "uuid": arg("-pluginUUID") }));
+    let Ok((mut ws, _)) = tungstenite::client(format!("ws://127.0.0.1:{}", a.port), stream) else { return };
+    send(&mut ws, json!({ "event": a.event, "uuid": a.uuid }));
 
     let mut keys: HashMap<String, Option<Instant>> = HashMap::new(); // visible keys -> when pressed
-    let mut state = control::send(control::QUERY).unwrap_or(0);
+    let mut state = send_cmd(control::QUERY);
     loop {
         match ws.read() {
             Ok(Message::Text(t)) => {
@@ -97,11 +85,7 @@ fn main() {
                     }
                     "keyUp" => {
                         let held = keys.get_mut(&ctx).and_then(Option::take).is_some_and(|t| t.elapsed() >= HOLD);
-                        let ok = match control::send(if held { control::OPEN } else { control::TOGGLE }) {
-                            Some(_) => true,
-                            None => launch(),
-                        };
-                        if !ok {
+                        if send_cmd(if held { control::OPEN } else { control::TOGGLE }) == 0 {
                             send(&mut ws, json!({ "event": "showAlert", "context": ctx }));
                         }
                     }
@@ -113,7 +97,7 @@ fn main() {
             Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
             Err(_) => return, // Stream Deck closed the connection
         }
-        let now = control::send(control::QUERY).unwrap_or(0);
+        let now = send_cmd(control::QUERY);
         if now != state {
             state = now;
             for ctx in keys.keys().cloned().collect::<Vec<_>>() {
