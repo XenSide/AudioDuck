@@ -1,7 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+//! AudioDuck runs as a Stream Deck / OpenDeck plugin: no window, no tray. Everything is configured from the key's
+//! property inspector (streamdeck/…/ui/inspector.html).
 mod audio;
 mod engine;
-mod ui;
+mod icon;
+mod streamdeck;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -10,19 +13,13 @@ use std::time::{Duration, Instant};
 
 use engine::{Ducker, Rule, Settings};
 use serde::{Deserialize, Serialize};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HWND};
+use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::core::w;
-use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
-use windows::Win32::UI::WindowsAndMessaging::*;
 
-const TICK_MS: u32 = 30;
+const TICK: Duration = Duration::from_millis(30);
 const REFRESH: Duration = Duration::from_secs(1);
-pub const ACCENT: [u8; 3] = [124, 156, 255];
-pub const DUCKING: [u8; 3] = [255, 180, 84];
-const OFF: [u8; 3] = [90, 95, 110];
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -32,26 +29,40 @@ pub struct Config {
     pub rules: Vec<Rule>,
 }
 
+impl Config {
+    /// Gives every rule without one a fresh id.
+    pub fn ensure_ids(&mut self) {
+        let mut next = self.rules.iter().map(|r| r.id).max().unwrap_or(0);
+        for r in self.rules.iter_mut().filter(|r| r.id == 0) {
+            next += 1;
+            r.id = next;
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self { enabled: true, settings: Settings::default(), rules: vec![] }
     }
 }
 
-/// What the engine measured, for the window.
-#[derive(Default)]
+/// What the engine measured. Per-app values are only filled while a property inspector is open.
+#[derive(Default, Serialize)]
 pub struct Live {
     pub peaks: Vec<(String, f32)>,
     pub gains: HashMap<String, f32>,
     pub volumes: HashMap<String, f32>,
     pub ducking: bool,
+    /// Ids of the rules ducking right now.
+    pub active_rules: Vec<u64>,
 }
 
 pub struct Shared {
     pub config: Config,
     pub rev: u64, // bumped on every config change so the engine picks it up
     pub live: Live,
-    pub hwnd: isize,
+    pub inspector_open: bool,
+    pub quit: bool,
 }
 
 pub type SharedRef = Arc<Mutex<Shared>>;
@@ -80,48 +91,8 @@ pub fn save_config(c: &Config) {
     let _ = std::fs::write(app_dir().join("config.json"), serde_json::to_string_pretty(c).unwrap_or_default());
 }
 
-/// Rounded square with three equalizer bars, RGBA.
-pub fn icon_rgba(color: [u8; 3], size: u32) -> Vec<u8> {
-    let s = size as f32;
-    let inside_rrect = |x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32| {
-        let dx = (x0 + r - x).max(x - (x1 - r)).max(0.0);
-        let dy = (y0 + r - y).max(y - (y1 - r)).max(0.0);
-        (r + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0) // antialiased coverage
-    };
-    let bars = [(0.22, 0.31), (0.41, 0.56), (0.59, 0.41)]; // (x, height) as fractions of size
-    let mut out = Vec::with_capacity((size * size * 4) as usize);
-    for py in 0..size {
-        for px in 0..size {
-            let (x, y) = (px as f32 + 0.5, py as f32 + 0.5);
-            let bg = inside_rrect(x, y, 0.0, 0.0, s, s, s * 0.25);
-            let bar = bars.iter().map(|&(bx, h)| inside_rrect(x, y, bx * s, (0.5 - h / 2.0) * s, (bx + 0.13) * s, (0.5 + h / 2.0) * s, s * 0.065)).fold(0.0, f32::max);
-            let mix = |c: u8| (c as f32 * (1.0 - bar) + 21.0 * bar) as u8;
-            out.extend([mix(color[0]), mix(color[1]), mix(color[2]), (bg * 255.0) as u8]);
-        }
-    }
-    out
-}
-
-fn tray_icon(color: [u8; 3]) -> Option<tray_icon::Icon> {
-    tray_icon::Icon::from_rgba(icon_rgba(color, 32), 32, 32).ok()
-}
-
-/// On screen: visible and not minimized (Windows counts minimized windows as visible).
-pub fn window_shown(hwnd: isize) -> bool {
-    unsafe { IsWindowVisible(HWND(hwnd as _)).as_bool() && !IsIconic(HWND(hwnd as _)).as_bool() }
-}
-
-pub fn show_window(hwnd: isize) {
-    unsafe {
-        let h = HWND(hwnd as _);
-        let _ = ShowWindow(h, SW_SHOW);
-        let _ = ShowWindow(h, SW_RESTORE);
-        let _ = SetForegroundWindow(h);
-    }
-}
-
-/// Audio + tray thread. Owns every COM object; talks to the window only through `Shared`.
-fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
+/// Audio loop. Owns every COM object; talks to the plugin side only through `Shared`.
+fn engine(shared: SharedRef) {
     let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let state = app_dir().join("ducked_state.json");
     if !state.exists() && let Some(s) = read_with_fallback("ducked_state.json") {
@@ -130,61 +101,23 @@ fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
     }
     let mut mixer = audio::Mixer::new(state);
     let mut cfg = shared.lock().unwrap().config.clone();
-
-    let open = MenuItem::new("Apri AudioDuck", true, None);
-    let toggle = CheckMenuItem::new("Ducking attivo", true, cfg.enabled, None);
-    let quit = MenuItem::new("Esci", true, None);
-    let menu = Menu::new();
-    let _ = menu.append_items(&[&open, &toggle, &PredefinedMenuItem::separator(), &quit]);
-    // tray-icon needs a message loop on its thread: the wait below pumps it.
-    let tray = TrayIconBuilder::new().with_menu(Box::new(menu)).with_menu_on_left_click(false).with_tooltip("AudioDuck").build().ok();
-
-    let show = |shared: &SharedRef| {
-        // Copy the handle and release the lock first: ShowWindow waits for the UI thread, which may be waiting for this lock.
-        let hwnd = shared.lock().unwrap().hwnd;
-        show_window(hwnd);
-        ctx.request_repaint();
-    };
     let mut ducker = Ducker::default();
     let mut rev = u64::MAX;
     let (mut last_tick, mut last_refresh) = (Instant::now(), Instant::now() - REFRESH);
-    let mut was = (false, None::<bool>); // (enabled, ducking) last shown in tray
-    let mut was_visible = false;
+    let mut was_enabled = false;
+    let mut was_open = false;
 
     loop {
-        unsafe {
-            MsgWaitForMultipleObjects(None, false, TICK_MS, QS_ALLINPUT);
-            let mut msg = MSG::default();
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        }
-        while let Ok(e) = TrayIconEvent::receiver().try_recv() {
-            if matches!(e, TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }) {
-                show(&shared);
-            }
-        }
-        while let Ok(e) = MenuEvent::receiver().try_recv() {
-            if e.id == *open.id() {
-                show(&shared);
-            } else if e.id == *toggle.id() {
-                let mut sh = shared.lock().unwrap();
-                sh.config.enabled = toggle.is_checked();
-                sh.rev += 1;
-                save_config(&sh.config);
-                ctx.request_repaint();
-            } else if e.id == *quit.id() {
-                mixer.restore_all();
-                std::process::exit(0);
-            }
-        }
-
+        std::thread::sleep(TICK);
         let now = Instant::now();
         let dt = (now - last_tick).as_secs_f64().min(0.2) * 1000.0;
         last_tick = now;
-        let hwnd = {
+        let open = {
             let sh = shared.lock().unwrap();
+            if sh.quit {
+                mixer.restore_all();
+                return;
+            }
             if sh.rev != rev {
                 rev = sh.rev;
                 if sh.config.rules != cfg.rules {
@@ -193,72 +126,66 @@ fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
                 }
                 cfg = sh.config.clone();
             }
-            sh.hwnd
+            sh.inspector_open
         };
-        let visible = window_shown(hwnd);
-        if visible != was_visible {
-            was_visible = visible;
+        if open != was_open {
+            was_open = open;
             last_refresh -= REFRESH;
         }
         if now - last_refresh >= REFRESH {
             last_refresh = now;
-            // Hidden: only rule sources need accurate levels. Visible: every app, for the meters.
-            mixer.refresh(|app| visible || cfg.rules.iter().any(|r| r.enabled && r.sources.iter().any(|s| s == app)));
+            // Inspector closed: only rule sources need accurate levels. Open: every app, for the meters.
+            mixer.refresh(|app| open || cfg.rules.iter().any(|r| r.enabled && r.sources.iter().any(|s| s == app)));
         }
         let peaks = mixer.peaks();
         if cfg.enabled {
             mixer.apply(ducker.step(&cfg.rules, &cfg.settings, &peaks, dt));
-        } else if was.0 {
+        } else if was_enabled {
             mixer.restore_all();
             ducker.gains.clear();
         }
+        was_enabled = cfg.enabled;
         let ducking = cfg.enabled && ducker.gains.values().any(|&g| g < 0.999);
-        if (cfg.enabled, Some(ducking)) != was {
-            was = (cfg.enabled, Some(ducking));
-            if let Some(t) = &tray {
-                let _ = t.set_icon(tray_icon(if ducking { DUCKING } else if cfg.enabled { ACCENT } else { OFF }));
-                let _ = t.set_tooltip(Some(format!("AudioDuck — {}", if ducking { "sta abbassando" } else if cfg.enabled { "attivo" } else { "in pausa" })));
-            }
-            toggle.set_checked(cfg.enabled);
-        }
-        if visible {
+        let active_rules = if cfg.enabled { cfg.rules.iter().zip(&ducker.active).filter(|&(_, &a)| a).map(|(r, _)| r.id).collect() } else { vec![] };
+        let mut sh = shared.lock().unwrap();
+        sh.live.ducking = ducking;
+        sh.live.active_rules = active_rules;
+        if open {
             let mut list: Vec<_> = peaks.into_iter().collect();
             list.sort_by(|a, b| a.0.cmp(&b.0));
-            let volumes = mixer.volumes();
-            let mut sh = shared.lock().unwrap();
-            sh.live = Live { peaks: list, gains: ducker.gains.clone(), volumes, ducking };
+            sh.live.peaks = list;
+            sh.live.gains = ducker.gains.clone();
+            sh.live.volumes = mixer.volumes();
         }
     }
 }
 
-fn main() -> eframe::Result {
+fn main() {
+    let Some(plugin) = streamdeck::Args::parse() else { return }; // only runs when started by Stream Deck / OpenDeck
     // Two instances would each take the other's ducked volume as the user's and push it down for good.
     let _single = unsafe { CreateMutexW(None, false, w!("AudioDuck.SingleInstance")) };
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-        if let Ok(h) = unsafe { FindWindowW(w!("Window Class"), w!("AudioDuck")) } {
-            show_window(h.0 as isize);
-        }
-        return Ok(());
+        return;
     }
-    let start_hidden = std::env::args().any(|a| a == "--tray");
-    let shared: SharedRef = Arc::new(Mutex::new(Shared { config: load_config(), rev: 0, live: Live::default(), hwnd: 0 }));
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("AudioDuck")
-            .with_inner_size([640.0, 780.0])
-            .with_min_inner_size([480.0, 420.0])
-            .with_visible(!start_hidden)
-            .with_icon(eframe::egui::IconData { rgba: icon_rgba(ACCENT, 64), width: 64, height: 64 }),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "AudioDuck",
-        options,
-        Box::new(move |cc| {
-            let app = ui::App::new(cc, shared.clone(), start_hidden);
-            let ctx = cc.egui_ctx.clone();
-            std::thread::spawn(move || engine_thread(shared, ctx));
-            Ok(Box::new(app))
-        }),
-    )
+    let mut config = load_config();
+    config.ensure_ids();
+    let shared: SharedRef = Arc::new(Mutex::new(Shared { config, rev: 0, live: Live::default(), inspector_open: false, quit: false }));
+    let sd = shared.clone();
+    std::thread::spawn(move || {
+        streamdeck::run(plugin, &sd);
+        sd.lock().unwrap().quit = true; // Stream Deck is gone: restore volumes and exit with it
+    });
+    engine(shared);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_ids_keeps_existing_and_numbers_new_ones_after_the_highest() {
+        let mut c = Config { rules: vec![Rule { id: 5, ..Default::default() }, Rule::default(), Rule::default()], ..Default::default() };
+        c.ensure_ids();
+        assert_eq!(c.rules.iter().map(|r| r.id).collect::<Vec<_>>(), [5, 6, 7]);
+    }
 }

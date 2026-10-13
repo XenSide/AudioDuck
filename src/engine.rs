@@ -5,6 +5,8 @@ use std::collections::HashMap;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Rule {
+    /// Stable across edits and reorders, so a Stream Deck key can point at this rule. 0 = not assigned yet.
+    pub id: u64,
     pub sources: Vec<String>,
     /// Apps to duck; with `all_others`, apps to leave alone.
     pub targets: Vec<String>,
@@ -19,7 +21,7 @@ pub struct Rule {
 
 impl Default for Rule {
     fn default() -> Self {
-        Self { sources: vec![], targets: vec![], all_others: false, level: 0.2, enabled: true }
+        Self { id: 0, sources: vec![], targets: vec![], all_others: false, level: 0.2, enabled: true }
     }
 }
 
@@ -43,6 +45,8 @@ impl Default for Settings {
 #[derive(Default)]
 pub struct Ducker {
     pub gains: HashMap<String, f32>,
+    /// Per rule (same order as `rules`): whether it is ducking right now.
+    pub active: Vec<bool>,
     t: f64,
     last_loud: HashMap<usize, f64>, // rule index -> time its sources were last above threshold
 }
@@ -63,9 +67,9 @@ impl Ducker {
         }
 
         let mut desired: HashMap<&str, f32> = peaks.keys().map(|a| (a.as_str(), 1.0)).collect();
+        self.active = rules.iter().enumerate().map(|(i, r)| r.enabled && self.last_loud.get(&i).is_some_and(|&t| self.t - t <= s.hold_ms as f64)).collect();
         for (i, r) in rules.iter().enumerate() {
-            let active = r.enabled && self.last_loud.get(&i).is_some_and(|&t| self.t - t <= s.hold_ms as f64);
-            if !active {
+            if !self.active[i] {
                 continue;
             }
             for (app, want) in desired.iter_mut() {
@@ -119,6 +123,7 @@ mod tests {
         assert_eq!(run(&mut d, &rules, &s, &quiet, 250)["spotify.exe"], 0.2); // still holding
         assert_eq!(run(&mut d, &rules, &s, &quiet, 400)["spotify.exe"], 1.0); // released
         assert_eq!(d.gains["discord.exe"], 1.0);
+        assert_eq!(d.active, [false]);
     }
 
     #[test]
