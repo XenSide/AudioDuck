@@ -6,11 +6,14 @@ of its keys is on a profile.
 
 One action, "Ducking Rule": **one key = one rule**.
 
-- **Key settings** (`ui/rule.html`): set up the key's rule (which apps trigger it, which apps get quieter or "all the
+- **Key settings** (`ui/rule.html`): set up the key's rule and its style (which apps trigger it, which apps get quieter or "all the
   others", how much), or pick an existing rule, or delete it. Below: apps playing with live levels and volumes, and
   the threshold and timings, which are shared by all keys.
-- **Tap**: turns the key's rule off and on. Title = the rule's trigger app(s); grey = off, blue = listening,
-  orange = ducking right now. "Set up" = no rule set up yet.
+- **Key image** (Foreground Boost's design, `src/keyimage.rs`): the trigger app's icon and the ducked volume
+  (`⌄ 20%`). Dimmed with "Off" when the rule is off, a filled pill while it is ducking, "Set up" when the key has no
+  rule yet. Style per key: Default (stock Stream Deck look) or Duotone (blue, orange, purple, red or custom colours,
+  app icons recoloured to match).
+- **Tap**: turns the key's rule off and on.
 
 Rules live in `%APPDATA%\AudioDuck\config.json` with a stable `id`; a key's settings are `{"rule": id}`. Removing a key
 does not delete its rule (Stream Deck doesn't tell plugins a key was removed): delete it from the key's settings first,

@@ -135,7 +135,7 @@ pub struct Mixer {
 }
 
 /// pid -> (lowercase exe name, parent pid)
-fn processes() -> HashMap<u32, (String, u32)> {
+pub fn processes() -> HashMap<u32, (String, u32)> {
     let mut out = HashMap::new();
     unsafe {
         let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };

@@ -1,8 +1,7 @@
 //! App icon, shared with the Stream Deck plugin (`src/streamdeck.rs`) and `examples/icons.rs`.
+#![allow(dead_code)] // ACCENT, icon_rgba and png are for examples/icons.rs
 
 pub const ACCENT: [u8; 3] = [124, 156, 255];
-pub const DUCKING: [u8; 3] = [255, 180, 84];
-pub const OFF: [u8; 3] = [90, 95, 110];
 
 /// Rounded square with three equalizer bars, RGBA.
 pub fn icon_rgba(color: [u8; 3], size: u32) -> Vec<u8> {
@@ -27,12 +26,16 @@ pub fn icon_rgba(color: [u8; 3], size: u32) -> Vec<u8> {
 }
 
 /// PNG file bytes, for the plugin's key images and manifest icons.
-#[allow(dead_code)] // not used by the app itself
 pub fn png(color: [u8; 3], size: u32) -> Vec<u8> {
+    encode(&icon_rgba(color, size), size)
+}
+
+/// PNG file bytes of a square RGBA image.
+pub fn encode(rgba: &[u8], size: u32) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut enc = png::Encoder::new(&mut buf, size, size);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
-    enc.write_header().and_then(|mut w| w.write_image_data(&icon_rgba(color, size))).expect("png encode");
+    enc.write_header().and_then(|mut w| w.write_image_data(rgba)).expect("png encode");
     buf
 }

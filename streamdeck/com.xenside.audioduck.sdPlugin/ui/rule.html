@@ -1,57 +1,88 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<style>
-	:root { --bg: #2d2d2d; --row: #3a3a3a; --input: #3d3d3d; --line: #4a4a4a; --text: #d8d8d8; --muted: #969696; --accent: #7c9cff; --duck: #ffb454; }
-	* { box-sizing: border-box; }
-	body { margin: 0; padding: 10px 12px 16px; background: var(--bg); color: var(--text); font: 9pt -apple-system, "Segoe UI", sans-serif; }
-	h2 { font-size: 9pt; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin: 16px 0 6px; }
-	button { background: var(--input); color: var(--text); border: 1px solid #5a5a5a; border-radius: 3px; padding: 3px 9px; font: inherit; cursor: pointer; }
-	button.primary { background: var(--accent); color: #15161b; border-color: var(--accent); font-weight: 600; }
-	select, input[type=text], input[type=number] { background: var(--input); color: var(--text); border: 1px solid var(--line); border-radius: 3px; padding: 3px 6px; font: inherit; }
-	select { flex: 1; min-width: 0; }
-	input[type=range] { accent-color: var(--accent); flex: 1; }
-	input[type=checkbox] { accent-color: var(--accent); margin: 0 6px 0 0; }
-	label { display: flex; align-items: center; }
-	.line { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
-	.line > .k { flex: 0 0 120px; color: var(--muted); }
-	.status { font-size: 11pt; font-weight: 600; }
-	.muted { color: var(--muted); }
-	.cols { display: flex; gap: 8px; }
-	.cols > div { flex: 1; min-width: 0; }
-	.list { background: var(--row); border-radius: 3px; padding: 4px 6px; max-height: 160px; overflow-y: auto; }
-	.list label { margin: 3px 0; overflow-wrap: anywhere; }
-	.error { color: var(--duck); }
-	.app { display: grid; grid-template-columns: 90px 1fr 70px; align-items: center; gap: 8px; margin: 5px 0; }
-	.app .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.bar { height: 6px; background: var(--input); border-radius: 3px; overflow: hidden; }
-	.bar > div { height: 100%; background: var(--accent); }
-	.bar.loud > div { background: var(--duck); }
-	.vol { text-align: right; color: var(--muted); }
-	.vol.down { color: var(--duck); }
-</style>
+	<meta charset="utf-8" />
+	<link rel="stylesheet" href="sdpi.css" />
+	<style>
+		.list .sdpi-item-child { display: block !important; overflow-wrap: anywhere; }
+		.list { max-height: 150px; overflow-y: auto; }
+		.note { opacity: .7; }
+		.error { color: #ffb367; }
+		.apps { display: grid; grid-template-columns: 1fr; gap: 4px; }
+		.app { display: grid; grid-template-columns: 76px 1fr 64px; align-items: center; gap: 6px; }
+		.app .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.bar { height: 5px; background: #3d3d3d; border-radius: 3px; overflow: hidden; }
+		.bar > div { height: 100%; background: #d8d8d8; }
+		.bar.loud > div { background: #ffb367; }
+		.vol { text-align: right; opacity: .7; }
+		.vol.down { color: #ffb367; opacity: 1; }
+	</style>
 </head>
 <body>
-	<div class="status" id="status">…</div>
-	<div class="line"><span class="k">Rule for this key</span><select id="pick"></select></div>
+	<div class="sdpi-wrapper">
+		<div class="sdpi-item">
+			<div class="sdpi-item-label">Rule</div>
+			<select class="sdpi-item-value select" id="pick"></select>
+		</div>
+		<div class="sdpi-item">
+			<div class="sdpi-item-label empty"></div>
+			<div class="sdpi-item-value note" id="status">…</div>
+		</div>
 
-	<div id="editor"></div>
+		<div id="editor"></div>
 
-	<h2>App in riproduzione</h2>
-	<div id="apps" class="muted">No app is playing audio.</div>
+		<div class="sdpi-heading">Style</div>
+		<div class="sdpi-item">
+			<div class="sdpi-item-label">Style</div>
+			<select class="sdpi-item-value select" id="style">
+				<option value="default">Default</option>
+				<option value="duotone">Duotone</option>
+			</select>
+		</div>
+		<div class="sdpi-item" id="duoItem" style="display:none;">
+			<div class="sdpi-item-label">Colour</div>
+			<select class="sdpi-item-value select" id="duoPreset">
+				<option value="blue">Blue</option>
+				<option value="orange">Orange</option>
+				<option value="purple">Purple</option>
+				<option value="red">Red</option>
+				<option value="custom">Custom…</option>
+			</select>
+		</div>
+		<div class="sdpi-item" type="color" id="duoCustom" style="display:none;">
+			<div class="sdpi-item-label">Custom</div>
+			<div class="sdpi-item-value" style="display:flex;gap:8px;align-items:center;">
+				<input type="color" id="duoBg" value="#3b4c66" title="Background" />
+				<input type="color" id="duoAccent" value="#67a4ff" title="Accent" />
+			</div>
+		</div>
 
-	<h2>Settings (shared by all keys)</h2>
-	<div class="line" title="Bars turn orange above the threshold">
-		<span class="k">Trigger threshold</span><input type="range" id="threshold" min="1" max="30" /><span id="thresholdPct"></span>
+		<div class="sdpi-heading">Apps playing</div>
+		<div class="sdpi-item">
+			<div class="sdpi-item-label empty"></div>
+			<div class="sdpi-item-value apps" id="apps"><span class="note">No app is playing audio.</span></div>
+		</div>
+
+		<div class="sdpi-heading">Timing (shared by all keys)</div>
+		<div class="sdpi-item" type="range" title="Bars turn orange above the threshold">
+			<div class="sdpi-item-label">Threshold</div>
+			<div class="sdpi-item-value">
+				<input type="range" id="threshold" min="1" max="30" style="flex:1;min-width:0;width:auto;" /><span id="thresholdPct" style="min-width:3em;"></span>
+			</div>
+		</div>
+		<div class="sdpi-item"><div class="sdpi-item-label">Fade down</div><input class="sdpi-item-value" type="number" id="attack_ms" min="0" max="5000" step="10" placeholder="ms" /></div>
+		<div class="sdpi-item"><div class="sdpi-item-label">Hold</div><input class="sdpi-item-value" type="number" id="hold_ms" min="0" max="5000" step="10" placeholder="ms" /></div>
+		<div class="sdpi-item"><div class="sdpi-item-label">Fade up</div><input class="sdpi-item-value" type="number" id="release_ms" min="0" max="5000" step="10" placeholder="ms" /></div>
+		<div class="sdpi-item">
+			<div class="sdpi-item-label empty"></div>
+			<div class="sdpi-item-value note">Times in milliseconds. Hold keeps the volume down through short pauses before fading back up. Tap the key to turn its rule off and on.</div>
+		</div>
 	</div>
-	<div class="line"><span class="k">Fade down</span><input type="number" id="attack_ms" min="0" max="5000" step="10" /> ms</div>
-	<div class="line"><span class="k">Hold before restoring</span><input type="number" id="hold_ms" min="0" max="5000" step="10" /> ms</div>
-	<div class="line"><span class="k">Fade up</span><input type="number" id="release_ms" min="0" max="5000" step="10" /> ms</div>
 
 <script>
 	let ws, uuid, settings = {}, config = null, live = { peaks: [], gains: {}, volumes: {}, active_rules: [] };
 	let draft = null, draftFor = undefined; // editor state, rebuilt only when the key's rule changes
+	let uid = 0; // ids for checkbox/label pairs
 	const $ = (id) => document.getElementById(id);
 	const el = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids); return e; };
 	const pretty = (app) => { const s = app.replace(/\.exe$/, ''); return s.charAt(0).toUpperCase() + s.slice(1); };
@@ -60,6 +91,7 @@
 	window.connectElgatoStreamDeckSocket = (port, inUUID, registerEvent, info, actionInfo) => {
 		uuid = inUUID;
 		try { settings = JSON.parse(actionInfo).payload.settings || {}; } catch { settings = {}; }
+		styleToUi();
 		ws = new WebSocket('ws://127.0.0.1:' + port);
 		ws.onopen = () => {
 			ws.send(JSON.stringify({ event: registerEvent, uuid }));
@@ -76,12 +108,12 @@
 	function send(event, payload) {
 		if (ws && ws.readyState === 1) ws.send(JSON.stringify({ event, context: uuid, payload }));
 	}
-
-	function save() { send('sendToPlugin', { config }); }
+	const save = () => send('sendToPlugin', { config });
+	const saveSettings = () => send('setSettings', settings);
 
 	function setRule(id) {
-		settings = { rule: id };
-		send('setSettings', settings);
+		settings.rule = id;
+		saveSettings();
 		renderConfig();
 	}
 
@@ -99,17 +131,16 @@
 		for (const k of ['attack_ms', 'hold_ms', 'release_ms']) if (document.activeElement !== $(k)) $(k).value = s[k];
 
 		const current = ruleOf();
-		$('pick').replaceChildren(el('option', { value: 'new', textContent: '+ New rule' }), ...config.rules.map((r) => el('option', { value: r.id, textContent: summary(r) })));
+		$('pick').replaceChildren(new Option('+ New rule', 'new'), ...config.rules.map((r) => new Option(summary(r), r.id)));
 		$('pick').value = current ? current.id : 'new';
 		if (draftFor !== (current ? current.id : 0)) openEditor(current);
 		renderStatus();
 	}
 
 	function renderStatus() {
-		const r = ruleOf(), st = $('status');
+		const r = ruleOf();
 		const ducking = r && r.enabled && live.active_rules.includes(r.id);
-		st.textContent = !r ? 'New rule: pick the apps and create it' : !r.enabled ? 'Rule off (press the key to turn it back on)' : ducking ? 'Lowering the volume…' : 'Rule on, listening';
-		st.style.color = ducking ? 'var(--duck)' : '';
+		$('status').textContent = !r ? 'New rule: pick the apps, then Create.' : !r.enabled ? 'Off. Tap the key to turn it back on.' : ducking ? 'Lowering the volume now.' : 'On, listening.';
 	}
 
 	function renderLive() {
@@ -121,12 +152,11 @@
 			renderEditor();
 		}
 		const apps = $('apps');
-		if (!live.peaks.length) { apps.className = 'muted'; apps.textContent = "No app is playing audio."; return; }
-		apps.className = '';
+		if (!live.peaks.length) { apps.replaceChildren(el('span', { className: 'note', textContent: 'No app is playing audio.' })); return; }
 		apps.replaceChildren(...live.peaks.map(([app, peak]) => {
 			const g = live.gains[app] ?? 1;
 			const v = live.volumes[app];
-			const vol = v === undefined ? '' : 'vol ' + Math.round(v * g * 100) + '%';
+			const vol = v === undefined ? '' : Math.round(v * g * 100) + '%';
 			const loud = config && peak > config.settings.threshold;
 			return el('div', { className: 'app' },
 				el('span', { className: 'name', textContent: pretty(app), title: app }),
@@ -139,38 +169,48 @@
 		const r = rule || { id: 0, sources: [], targets: [], all_others: false, level: 0.2, enabled: true };
 		const apps = [...new Set([...live.peaks.map(([a]) => a), ...r.sources, ...r.targets])].sort();
 		draftFor = r.id;
-		draft = { id: r.id, enabled: r.enabled, all_others: r.all_others, level: r.level, error: '', saved: false,
+		draft = { id: r.id, all_others: r.all_others, level: r.level, error: '', saved: false,
 			sources: apps.map((a) => [a, r.sources.includes(a)]), targets: apps.map((a) => [a, r.targets.includes(a)]) };
 		renderEditor();
 	}
 
+	// sdpi checkbox: hidden input + label with an empty span that draws the box.
+	function checkbox(checked, text, onchange) {
+		const id = 'c' + uid++;
+		const c = el('input', { type: 'checkbox', id, checked });
+		c.onchange = () => onchange(c.checked);
+		const label = el('label', {}, el('span'), text);
+		label.htmlFor = id;
+		return el('div', { className: 'sdpi-item-child' }, c, label);
+	}
+
+	const row = (label, value, type) => {
+		const item = el('div', { className: 'sdpi-item' }, el('div', { className: 'sdpi-item-label' + (label ? '' : ' empty'), textContent: label }), value);
+		if (type) item.setAttribute('type', type);
+		return item;
+	};
+
 	function renderEditor() {
 		const ed = draft;
-		const list = (items) => el('div', { className: 'list' }, ...items.map((it) => {
-			const c = el('input', { type: 'checkbox', checked: it[1] });
-			c.onchange = () => { it[1] = c.checked; ed.saved = false; renderEditor(); };
-			return el('label', {}, c, it[0]);
-		}));
-		const others = el('input', { type: 'checkbox', checked: ed.all_others });
-		others.onchange = () => { ed.all_others = others.checked; ed.saved = false; renderEditor(); };
-		const manual = el('input', { type: 'text', placeholder: 'App not playing now, e.g. spotify.exe', style: 'flex:1;min-width:0' });
-		const addManual = () => {
+		const list = (items) => el('div', { className: 'sdpi-item-value list' }, ...items.map((it) => checkbox(it[1], it[0], (on) => { it[1] = on; ed.saved = false; renderEditor(); })));
+		const manual = el('input', { className: 'sdpi-item-value', type: 'text', placeholder: 'e.g. spotify.exe (Enter)' });
+		manual.onkeydown = (e) => {
+			if (e.key !== 'Enter') return;
 			let app = manual.value.trim().toLowerCase();
 			if (!app) return;
 			if (!app.endsWith('.exe')) app += '.exe';
 			for (const l of [ed.sources, ed.targets]) if (!l.some(([a]) => a === app)) l.push([app, false]);
 			renderEditor();
 		};
-		manual.onkeydown = (e) => { if (e.key === 'Enter') addManual(); };
-		const level = el('input', { type: 'range', min: 0, max: 100, value: Math.round(ed.level * 100) });
-		const pct = el('span', { textContent: Math.round(ed.level * 100) + '%' });
+		const level = el('input', { type: 'range', min: 0, max: 100, value: Math.round(ed.level * 100), style: 'flex:1;min-width:0;width:auto;' });
+		const pct = el('span', { textContent: Math.round(ed.level * 100) + '%', style: 'min-width:3em;' });
 		level.oninput = () => { ed.level = level.value / 100; ed.saved = false; pct.textContent = level.value + '%'; };
-		const ok = el('button', { className: 'primary', textContent: ed.id ? 'Save' : 'Create rule' });
+		const ok = el('button', { className: 'sdpi-item-value', textContent: ed.id ? 'Save' : 'Create rule' });
 		ok.onclick = () => {
 			const picked = (l) => l.filter(([, c]) => c).map(([a]) => a);
 			const sources = picked(ed.sources), targets = picked(ed.targets);
-			if (!sources.length) ed.error = "Pick at least one app that triggers ducking.";
-			else if (!ed.all_others && !targets.length) ed.error = "Pick at least one app to lower.";
+			if (!sources.length) ed.error = 'Pick at least one app that triggers ducking.';
+			else if (!ed.all_others && !targets.length) ed.error = 'Pick at least one app to lower.';
 			else {
 				ed.error = '';
 				const isNew = !ed.id;
@@ -185,24 +225,32 @@
 			}
 			renderEditor();
 		};
-		const del = el('button', { textContent: 'Delete rule' });
-		del.onclick = () => {
-			config.rules = config.rules.filter((r) => r.id !== ed.id);
-			save();
-			setRule(0);
-		};
+		const del = el('button', { className: 'sdpi-item-value', textContent: 'Delete rule' });
+		del.onclick = () => { config.rules = config.rules.filter((r) => r.id !== ed.id); save(); setRule(0); };
+		const levelValue = el('div', { className: 'sdpi-item-value' }, level, pct);
 		$('editor').replaceChildren(
-			el('div', { className: 'cols' },
-				el('div', {}, el('div', { className: 'muted', textContent: 'When this plays…' }), list(ed.sources)),
-				el('div', {}, el('div', { className: 'muted', textContent: ed.all_others ? '…except these' : '…lower these' }), list(ed.targets))),
-			el('label', { style: 'margin-top:6px' }, others, 'Lower all other apps'),
-			el('div', { className: 'line' }, manual, el('button', { textContent: 'Add', onclick: addManual })),
-			el('div', { className: 'line' }, el('span', { className: 'k', textContent: 'Volume while ducking' }), level, pct),
-			ed.error ? el('div', { className: 'error', textContent: ed.error }) : '',
-			el('div', { className: 'line', style: 'justify-content:flex-end' },
-				ed.saved ? el('span', { className: 'muted', textContent: 'Saved' }) : '',
-				ed.id ? del : '', ok));
+			row('When', list(ed.sources), 'checkbox'),
+			row(ed.all_others ? 'Except' : 'Lower', list(ed.targets), 'checkbox'),
+			row('', el('div', { className: 'sdpi-item-value' }, checkbox(ed.all_others, 'Lower all other apps', (on) => { ed.all_others = on; ed.saved = false; renderEditor(); })), 'checkbox'),
+			row('Other app', manual),
+			row('Volume', levelValue, 'range'),
+			ed.error ? row('', el('div', { className: 'sdpi-item-value error', textContent: ed.error })) : '',
+			row('', ok),
+			ed.id ? row('', del) : '',
+			ed.saved ? row('', el('div', { className: 'sdpi-item-value note', textContent: 'Saved.' })) : '');
 	}
+
+	// Style: "default" (stock Stream Deck look) or "duotone" (Duotone Essentials colours), as in Foreground Boost.
+	function styleToUi() {
+		$('style').value = settings.style === 'duotone' ? 'duotone' : 'default';
+		$('duoPreset').value = settings.duoPreset || 'blue';
+		$('duoBg').value = settings.duoBg || '#3b4c66';
+		$('duoAccent').value = settings.duoAccent || '#67a4ff';
+		const duo = $('style').value === 'duotone';
+		$('duoItem').style.display = duo ? '' : 'none';
+		$('duoCustom').style.display = duo && $('duoPreset').value === 'custom' ? '' : 'none';
+	}
+	for (const id of ['style', 'duoPreset', 'duoBg', 'duoAccent']) $(id).addEventListener('change', () => { settings[id] = $(id).value; styleToUi(); saveSettings(); });
 
 	$('pick').onchange = () => setRule($('pick').value === 'new' ? 0 : Number($('pick').value));
 	$('threshold').oninput = () => { config.settings.threshold = $('threshold').value / 100; $('thresholdPct').textContent = $('threshold').value + '%'; };
