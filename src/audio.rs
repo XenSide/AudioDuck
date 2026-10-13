@@ -127,6 +127,9 @@ pub struct Mixer {
     sessions: HashMap<String, Session>,
     // root pid -> meter; None = loopback failed, use the session meter; absent = app not measured (reads as 0)
     loopbacks: HashMap<u32, Option<ProcessMeter>>,
+    // root pid -> app name of rule sources found as running processes, measured even before they open an audio
+    // session: a session only shows up on the next refresh, which made the first second of a new sound go unnoticed.
+    watched: HashMap<u32, String>,
     state_path: PathBuf,
     // Windows remembers per-app volume, so sessions that vanish while ducked (or all of them, if we died) get the
     // user's volume back when they reappear. Keyed by session identifier.
@@ -166,12 +169,13 @@ fn root_pid(procs: &HashMap<u32, (String, u32)>, pid: u32, name: &str) -> u32 {
 impl Mixer {
     pub fn new(state_path: PathBuf) -> Self {
         let pending: HashMap<String, f32> = std::fs::read_to_string(&state_path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        Self { sessions: HashMap::new(), loopbacks: HashMap::new(), state_path, saved: pending.clone(), pending_restore: pending }
+        Self { sessions: HashMap::new(), loopbacks: HashMap::new(), watched: HashMap::new(), state_path, saved: pending.clone(), pending_restore: pending }
     }
 
     /// `measure(app)`: whether that app needs an accurate level (each loopback costs a capture pipeline).
-    pub fn refresh(&mut self, measure: impl Fn(&str) -> bool) {
-        let mut procs = None; // process snapshot, only taken if a new session shows up
+    /// `watch(app)`: a rule source, measured as soon as its process runs, with or without an audio session.
+    pub fn refresh(&mut self, measure: impl Fn(&str) -> bool, watch: impl Fn(&str) -> bool) {
+        let procs = processes();
         let me = std::process::id();
         let mut found = HashMap::new();
         let mut restored = HashSet::new();
@@ -193,7 +197,6 @@ impl Mixer {
                         found.insert(key, s);
                         continue;
                     }
-                    let procs = procs.get_or_insert_with(processes);
                     let Some((name, _)) = procs.get(&pid) else { continue };
                     let (Ok(vol), Ok(meter)) = (ctl.cast::<ISimpleAudioVolume>(), ctl.cast::<IAudioMeterInformation>()) else { continue };
                     let Ok(sid) = ctl.GetSessionIdentifier() else { continue };
@@ -207,7 +210,7 @@ impl Mixer {
                         let _ = vol.SetMasterVolume(v, &CTX); // old state files were keyed by app name
                         restored.insert(name.clone()); // removed after the loop: the app may have a session per device
                     }
-                    let root = root_pid(procs, pid, name);
+                    let root = root_pid(&procs, pid, name);
                     found.insert(key, Session { name: name.clone(), sid: sid_str, root, vol, meter, base: 1.0, last_set: None });
                 }
             }
@@ -221,7 +224,8 @@ impl Mixer {
         }
         self.sessions = found;
 
-        let roots: HashSet<u32> = self.sessions.values().filter(|s| measure(&s.name)).map(|s| s.root).collect();
+        self.watched = procs.iter().filter(|(_, (n, _))| watch(n)).map(|(&pid, (n, _))| (root_pid(&procs, pid, n), n.clone())).collect();
+        let roots: HashSet<u32> = self.sessions.values().filter(|s| measure(&s.name)).map(|s| s.root).chain(self.watched.keys().copied()).collect();
         self.loopbacks.retain(|r, _| roots.contains(r));
         for r in roots {
             self.loopbacks.entry(r).or_insert_with(|| ProcessMeter::new(r).ok());
@@ -231,6 +235,14 @@ impl Mixer {
     pub fn peaks(&self) -> HashMap<String, f32> {
         let mut out: HashMap<String, f32> = HashMap::new();
         let mut read = HashSet::new();
+        for (&root, name) in &self.watched {
+            if let Some(Some(m)) = self.loopbacks.get(&root)
+                && read.insert(root)
+            {
+                let e = out.entry(name.clone()).or_default();
+                *e = e.max(m.peak().unwrap_or(0.0));
+            }
+        }
         for s in self.sessions.values() {
             let peak = match self.loopbacks.get(&s.root) {
                 Some(Some(m)) if read.insert(s.root) => m.peak().unwrap_or(0.0),

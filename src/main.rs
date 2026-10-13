@@ -112,7 +112,8 @@ fn engine(shared: SharedRef) {
         if now - last_refresh >= REFRESH {
             last_refresh = now;
             // Inspector closed: only rule sources need accurate levels. Open: every app, for the meters.
-            mixer.refresh(|app| open || cfg.rules.iter().any(|r| r.enabled && r.sources.iter().any(|s| s == app)));
+            let source = |app: &str| cfg.rules.iter().any(|r| r.enabled && r.sources.iter().any(|s| s == app));
+            mixer.refresh(|app| open || source(app), source);
         }
         let peaks = mixer.peaks();
         mixer.apply(ducker.step(&cfg.rules, &cfg.settings, &peaks, dt));
