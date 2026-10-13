@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - name: Plugin manifest and settings page parse
+        run: >-
+          node -e "const fs=require('fs'), d='streamdeck/com.xenside.audioduck.sdPlugin/';
+          JSON.parse(fs.readFileSync(d+'manifest.json','utf8'));
+          const h=fs.readFileSync(d+'ui/rule.html','utf8'); new Function(h.split('<script>')[1].split('</script>')[0]);"
