@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod audio;
+mod control;
 mod engine;
+mod icon;
 mod ui;
 
 use std::collections::HashMap;
@@ -9,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use engine::{Ducker, Rule, Settings};
+pub use icon::{ACCENT, DUCKING, OFF, icon_rgba};
 use serde::{Deserialize, Serialize};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -20,9 +23,6 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 const TICK_MS: u32 = 30;
 const REFRESH: Duration = Duration::from_secs(1);
-pub const ACCENT: [u8; 3] = [124, 156, 255];
-pub const DUCKING: [u8; 3] = [255, 180, 84];
-const OFF: [u8; 3] = [90, 95, 110];
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -80,28 +80,6 @@ pub fn save_config(c: &Config) {
     let _ = std::fs::write(app_dir().join("config.json"), serde_json::to_string_pretty(c).unwrap_or_default());
 }
 
-/// Rounded square with three equalizer bars, RGBA.
-pub fn icon_rgba(color: [u8; 3], size: u32) -> Vec<u8> {
-    let s = size as f32;
-    let inside_rrect = |x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32| {
-        let dx = (x0 + r - x).max(x - (x1 - r)).max(0.0);
-        let dy = (y0 + r - y).max(y - (y1 - r)).max(0.0);
-        (r + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0) // antialiased coverage
-    };
-    let bars = [(0.22, 0.31), (0.41, 0.56), (0.59, 0.41)]; // (x, height) as fractions of size
-    let mut out = Vec::with_capacity((size * size * 4) as usize);
-    for py in 0..size {
-        for px in 0..size {
-            let (x, y) = (px as f32 + 0.5, py as f32 + 0.5);
-            let bg = inside_rrect(x, y, 0.0, 0.0, s, s, s * 0.25);
-            let bar = bars.iter().map(|&(bx, h)| inside_rrect(x, y, bx * s, (0.5 - h / 2.0) * s, (bx + 0.13) * s, (0.5 + h / 2.0) * s, s * 0.065)).fold(0.0, f32::max);
-            let mix = |c: u8| (c as f32 * (1.0 - bar) + 21.0 * bar) as u8;
-            out.extend([mix(color[0]), mix(color[1]), mix(color[2]), (bg * 255.0) as u8]);
-        }
-    }
-    out
-}
-
 fn tray_icon(color: [u8; 3]) -> Option<tray_icon::Icon> {
     tray_icon::Icon::from_rgba(icon_rgba(color, 32), 32, 32).ok()
 }
@@ -145,6 +123,14 @@ fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
         show_window(hwnd);
         ctx.request_repaint();
     };
+    let set_enabled = |f: &dyn Fn(bool) -> bool| {
+        let mut sh = shared.lock().unwrap();
+        sh.config.enabled = f(sh.config.enabled);
+        sh.rev += 1;
+        save_config(&sh.config);
+        ctx.request_repaint();
+    };
+    control::create_window();
     let mut ducker = Ducker::default();
     let mut rev = u64::MAX;
     let (mut last_tick, mut last_refresh) = (Instant::now(), Instant::now() - REFRESH);
@@ -169,15 +155,16 @@ fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
             if e.id == *open.id() {
                 show(&shared);
             } else if e.id == *toggle.id() {
-                let mut sh = shared.lock().unwrap();
-                sh.config.enabled = toggle.is_checked();
-                sh.rev += 1;
-                save_config(&sh.config);
-                ctx.request_repaint();
+                set_enabled(&|_| toggle.is_checked());
             } else if e.id == *quit.id() {
                 mixer.restore_all();
                 std::process::exit(0);
             }
+        }
+        match control::REQUEST.swap(control::QUERY, std::sync::atomic::Ordering::SeqCst) {
+            control::TOGGLE => set_enabled(&|on| !on),
+            control::OPEN => show(&shared),
+            _ => {}
         }
 
         let now = Instant::now();
@@ -220,6 +207,7 @@ fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
                 let _ = t.set_tooltip(Some(format!("AudioDuck — {}", if ducking { "sta abbassando" } else if cfg.enabled { "attivo" } else { "in pausa" })));
             }
             toggle.set_checked(cfg.enabled);
+            control::STATE.store(if ducking { control::DUCKING } else if cfg.enabled { control::ACTIVE } else { control::PAUSED }, std::sync::atomic::Ordering::SeqCst);
         }
         if visible {
             let mut list: Vec<_> = peaks.into_iter().collect();
@@ -239,6 +227,11 @@ fn main() -> eframe::Result {
             show_window(h.0 as isize);
         }
         return Ok(());
+    }
+    // Lets the Stream Deck plugin start AudioDuck when it isn't running.
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::create_dir_all(app_dir());
+        let _ = std::fs::write(app_dir().join("exe_path"), exe.to_string_lossy().as_bytes());
     }
     let start_hidden = std::env::args().any(|a| a == "--tray");
     let shared: SharedRef = Arc::new(Mutex::new(Shared { config: load_config(), rev: 0, live: Live::default(), hwnd: 0 }));

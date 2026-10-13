@@ -1,0 +1,38 @@
+{
+	"Name": "AudioDuck",
+	"Version": "1.0.0.0",
+	"Author": "xenside",
+	"Description": "Pause or resume AudioDuck's ducking from a key, which shows whether it is paused, active or ducking right now. Hold the key to open AudioDuck. If AudioDuck isn't running, a tap starts it.",
+	"Category": "AudioDuck",
+	"CategoryIcon": "imgs/plugin/icon",
+	"Icon": "imgs/plugin/icon",
+	"SDKVersion": 2,
+	"CodePath": "bin/audioduck-streamdeck.exe",
+	"Software": {
+		"MinimumVersion": "6.5"
+	},
+	"OS": [
+		{
+			"Platform": "windows",
+			"MinimumVersion": "10"
+		}
+	],
+	"UUID": "com.xenside.audioduck",
+	"Actions": [
+		{
+			"UUID": "com.xenside.audioduck.toggle",
+			"Name": "Ducking",
+			"Icon": "imgs/actions/toggle/icon",
+			"Tooltip": "Tap: pause or resume ducking. Hold: open AudioDuck.",
+			"Controllers": ["Keypad"],
+			"UserTitleEnabled": false,
+			"States": [
+				{
+					"Image": "imgs/actions/toggle/key",
+					"TitleAlignment": "bottom",
+					"FontSize": "12"
+				}
+			]
+		}
+	]
+}
