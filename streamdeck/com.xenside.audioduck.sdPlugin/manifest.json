@@ -1,8 +1,8 @@
 {
 	"Name": "AudioDuck",
-	"Version": "1.1.0.0",
+	"Version": "2.0.0.0",
 	"Author": "xenside",
-	"Description": "Per-app audio ducking: when one app plays (e.g. Discord), others get quieter. Runs while Stream Deck runs. The key pauses or resumes ducking and shows whether it is paused, active or ducking right now; its settings hold the rules, live levels and timings.",
+	"Description": "Per-app audio ducking: when one app plays (e.g. Discord), others get quieter. Each key is one rule, set up in its settings; tapping the key turns that rule off and on, and its colour shows whether the rule is off, listening or ducking right now. Runs while Stream Deck runs.",
 	"Category": "AudioDuck",
 	"CategoryIcon": "imgs/plugin/icon",
 	"Icon": "imgs/plugin/icon",
@@ -20,27 +20,13 @@
 	"UUID": "com.xenside.audioduck",
 	"Actions": [
 		{
-			"UUID": "com.xenside.audioduck.toggle",
-			"Name": "Ducking",
-			"Icon": "imgs/actions/toggle/icon",
-			"Tooltip": "Pause or resume ducking. Rules and timings are in the key settings.",
-			"Controllers": ["Keypad"],
-			"UserTitleEnabled": false,
-			"States": [
-				{
-					"Image": "imgs/actions/toggle/key",
-					"TitleAlignment": "bottom",
-					"FontSize": "12"
-				}
-			],
-			"PropertyInspectorPath": "ui/inspector.html"
-		},
-		{
 			"UUID": "com.xenside.audioduck.rule",
-			"Name": "Regola",
+			"Name": "Regola di ducking",
 			"Icon": "imgs/actions/toggle/icon",
-			"Tooltip": "Disable or re-enable one ducking rule.",
-			"Controllers": ["Keypad"],
+			"Tooltip": "One ducking rule per key: set it up in the key settings, tap to turn it off and on.",
+			"Controllers": [
+				"Keypad"
+			],
 			"UserTitleEnabled": false,
 			"States": [
 				{
