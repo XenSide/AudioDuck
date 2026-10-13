@@ -21,7 +21,7 @@
 	"Actions": [
 		{
 			"UUID": "com.xenside.audioduck.rule",
-			"Name": "Regola di ducking",
+			"Name": "Ducking Rule",
 			"Icon": "imgs/actions/toggle/icon",
 			"Tooltip": "One ducking rule per key: set it up in the key settings, tap to turn it off and on.",
 			"Controllers": [
