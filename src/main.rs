@@ -4,6 +4,7 @@
 mod audio;
 mod engine;
 mod icon;
+mod keyimage;
 mod streamdeck;
 
 use std::collections::HashMap;
