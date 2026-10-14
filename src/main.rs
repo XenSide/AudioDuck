@@ -56,13 +56,16 @@ fn app_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("AudioDuck")
 }
 
+// config.json belongs to the desktop app (rules and all); the plugin only reads its timings until it has saved its own.
+const CONFIG: &str = "plugin.json";
+
 fn load_config() -> Config {
-    std::fs::read_to_string(app_dir().join("config.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    [CONFIG, "config.json"].iter().find_map(|f| std::fs::read_to_string(app_dir().join(f)).ok()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
 pub fn save_config(c: &Config) {
     let _ = std::fs::create_dir_all(app_dir());
-    let _ = std::fs::write(app_dir().join("config.json"), serde_json::to_string_pretty(c).unwrap_or_default());
+    let _ = std::fs::write(app_dir().join(CONFIG), serde_json::to_string_pretty(c).unwrap_or_default());
 }
 
 /// Audio loop. Owns every COM object; talks to the plugin side only through `Shared`.
