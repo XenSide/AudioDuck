@@ -7,7 +7,7 @@ of its keys is on a profile.
 One action, "Ducking Rule": **one key = one rule**.
 
 - **Key settings** (`ui/rule.html`): set up the key's rule and its style (which apps trigger it, which apps get quieter or "all the
-  others", how much), or pick an existing rule, or delete it. Below: apps playing with live levels and volumes, and
+  others", how much). Below: apps playing with live levels and volumes, and
   the threshold and timings, which are shared by all keys.
 - **Key image** (Foreground Boost's design, `src/keyimage.rs`): the trigger app's icon and the ducked volume
   (`⌄ 20%`). Dimmed with "Off" when the rule is off, a filled pill while it is ducking, "Set up" when the key has no
@@ -16,8 +16,8 @@ One action, "Ducking Rule": **one key = one rule**.
 - **Tap**: turns the key's rule off and on.
 
 Rules live in `%APPDATA%\AudioDuck\config.json` with a stable `id`; a key's settings are `{"rule": id}`. Removing a key
-does not delete its rule (Stream Deck doesn't tell plugins a key was removed): delete it from the key's settings first,
-or pick it again from another key.
+removes its rule: Stream Deck doesn't tell plugins a key was removed, so a thread waits on a Windows change notification
+for Stream Deck's profile folders and deletes rules no key in any saved profile uses (Elgato Stream Deck only).
 
 Install: `powershell -File streamdeck/install.ps1` (builds, copies the plugin into Stream Deck, restarts it).
 For OpenDeck, copy `com.xenside.audioduck.sdPlugin` (with `bin/audioduck.exe`) into its plugins folder.
