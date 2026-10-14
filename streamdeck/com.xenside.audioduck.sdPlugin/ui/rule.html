@@ -21,10 +21,6 @@
 <body>
 	<div class="sdpi-wrapper">
 		<div class="sdpi-item">
-			<div class="sdpi-item-label">Rule</div>
-			<select class="sdpi-item-value select" id="pick"></select>
-		</div>
-		<div class="sdpi-item">
 			<div class="sdpi-item-label empty"></div>
 			<div class="sdpi-item-value note" id="status">…</div>
 		</div>
@@ -117,12 +113,6 @@
 		renderConfig();
 	}
 
-	function summary(r) {
-		const listed = r.targets.map(pretty).join(', ');
-		const targets = r.all_others ? (listed ? 'all except ' + listed : 'all others') : listed;
-		return (r.enabled ? 'On: ' : 'Off: ') + r.sources.map(pretty).join(', ') + ' → ' + targets + ' (' + Math.round(r.level * 100) + '%)';
-	}
-
 	function renderConfig() {
 		if (!config) return;
 		const s = config.settings;
@@ -131,8 +121,6 @@
 		for (const k of ['attack_ms', 'hold_ms', 'release_ms']) if (document.activeElement !== $(k)) $(k).value = s[k];
 
 		const current = ruleOf();
-		$('pick').replaceChildren(new Option('+ New rule', 'new'), ...config.rules.map((r) => new Option(summary(r), r.id)));
-		$('pick').value = current ? current.id : 'new';
 		if (draftFor !== (current ? current.id : 0)) openEditor(current);
 		renderStatus();
 	}
@@ -140,7 +128,7 @@
 	function renderStatus() {
 		const r = ruleOf();
 		const ducking = r && r.enabled && live.active_rules.includes(r.id);
-		$('status').textContent = !r ? 'New rule: pick the apps, then Create.' : !r.enabled ? 'Off. Tap the key to turn it back on.' : ducking ? 'Lowering the volume now.' : 'On, listening.';
+		$('status').textContent = !r ? 'Pick the apps below.' : !r.enabled ? 'Off. Tap the key to turn it back on.' : ducking ? 'Lowering the volume now.' : 'On, listening.';
 	}
 
 	function renderLive() {
@@ -169,7 +157,7 @@
 		const r = rule || { id: 0, sources: [], targets: [], all_others: false, level: 0.2, enabled: true };
 		const apps = [...new Set([...live.peaks.map(([a]) => a), ...r.sources, ...r.targets])].sort();
 		draftFor = r.id;
-		draft = { id: r.id, all_others: r.all_others, level: r.level, error: '', saved: false,
+		draft = { id: r.id, all_others: r.all_others, level: r.level,
 			sources: apps.map((a) => [a, r.sources.includes(a)]), targets: apps.map((a) => [a, r.targets.includes(a)]) };
 		renderEditor();
 	}
@@ -190,9 +178,28 @@
 		return item;
 	};
 
+	const picked = (l) => l.filter(([, c]) => c).map(([a]) => a);
+	const missing = (ed) => !picked(ed.sources).length ? 'Pick at least one app that triggers ducking.' : !ed.all_others && !picked(ed.targets).length ? 'Pick at least one app to lower.' : '';
+
+	// Every change is saved at once; the key's rule is created the first time it is complete.
+	function commit() {
+		const ed = draft;
+		if (missing(ed)) return renderEditor();
+		const isNew = !ed.id;
+		if (isNew) ed.id = config.rules.reduce((m, r) => Math.max(m, r.id), 0) + 1;
+		const rule = { id: ed.id, sources: picked(ed.sources), targets: picked(ed.targets), all_others: ed.all_others, level: ed.level, enabled: isNew || ruleOf()?.enabled !== false }; // on/off belongs to the key
+		const i = config.rules.findIndex((r) => r.id === ed.id);
+		if (i < 0) config.rules.push(rule); else config.rules[i] = rule;
+		draftFor = ed.id;
+		if (isNew) settings.rule = ed.id; // before save(), so the new rule arrives with its key
+		save();
+		if (isNew) setRule(ed.id); else renderConfig();
+		renderEditor();
+	}
+
 	function renderEditor() {
 		const ed = draft;
-		const list = (items) => el('div', { className: 'sdpi-item-value list' }, ...items.map((it) => checkbox(it[1], it[0], (on) => { it[1] = on; ed.saved = false; renderEditor(); })));
+		const list = (items) => el('div', { className: 'sdpi-item-value list' }, ...items.map((it) => checkbox(it[1], it[0], (on) => { it[1] = on; commit(); })));
 		const manual = el('input', { className: 'sdpi-item-value', type: 'text', placeholder: 'e.g. spotify.exe (Enter)' });
 		manual.onkeydown = (e) => {
 			if (e.key !== 'Enter') return;
@@ -204,41 +211,16 @@
 		};
 		const level = el('input', { type: 'range', min: 0, max: 100, value: Math.round(ed.level * 100), style: 'flex:1;min-width:0;width:auto;' });
 		const pct = el('span', { textContent: Math.round(ed.level * 100) + '%', style: 'min-width:3em;' });
-		level.oninput = () => { ed.level = level.value / 100; ed.saved = false; pct.textContent = level.value + '%'; };
-		const ok = el('button', { className: 'sdpi-item-value', textContent: ed.id ? 'Save' : 'Create rule' });
-		ok.onclick = () => {
-			const picked = (l) => l.filter(([, c]) => c).map(([a]) => a);
-			const sources = picked(ed.sources), targets = picked(ed.targets);
-			if (!sources.length) ed.error = 'Pick at least one app that triggers ducking.';
-			else if (!ed.all_others && !targets.length) ed.error = 'Pick at least one app to lower.';
-			else {
-				ed.error = '';
-				const isNew = !ed.id;
-				if (isNew) ed.id = config.rules.reduce((m, r) => Math.max(m, r.id), 0) + 1;
-				const rule = { id: ed.id, sources, targets, all_others: ed.all_others, level: ed.level, enabled: isNew || ruleOf()?.enabled !== false }; // on/off belongs to the key
-				const i = config.rules.findIndex((r) => r.id === ed.id);
-				if (i < 0) config.rules.push(rule); else config.rules[i] = rule;
-				draftFor = ed.id;
-				ed.saved = true;
-				if (isNew) settings.rule = ed.id; // before save(), so the new rule arrives with its key
-				save();
-				if (isNew) setRule(ed.id); else renderConfig();
-			}
-			renderEditor();
-		};
-		const del = el('button', { className: 'sdpi-item-value', textContent: 'Delete rule' });
-		del.onclick = () => { config.rules = config.rules.filter((r) => r.id !== ed.id); save(); setRule(0); };
+		level.oninput = () => { ed.level = level.value / 100; pct.textContent = level.value + '%'; };
+		level.onchange = commit;
 		const levelValue = el('div', { className: 'sdpi-item-value' }, level, pct);
 		$('editor').replaceChildren(
 			row('When', list(ed.sources), 'checkbox'),
 			row(ed.all_others ? 'Except' : 'Lower', list(ed.targets), 'checkbox'),
-			row('', el('div', { className: 'sdpi-item-value' }, checkbox(ed.all_others, 'Lower all other apps', (on) => { ed.all_others = on; ed.saved = false; renderEditor(); })), 'checkbox'),
+			row('', el('div', { className: 'sdpi-item-value' }, checkbox(ed.all_others, 'Lower all other apps', (on) => { ed.all_others = on; commit(); })), 'checkbox'),
 			row('Other app', manual),
 			row('Volume', levelValue, 'range'),
-			ed.error ? row('', el('div', { className: 'sdpi-item-value error', textContent: ed.error })) : '',
-			row('', ok),
-			ed.id ? row('', del) : '',
-			ed.saved ? row('', el('div', { className: 'sdpi-item-value note', textContent: 'Saved.' })) : '');
+			missing(ed) ? row('', el('div', { className: 'sdpi-item-value note', textContent: missing(ed) })) : '');
 	}
 
 	// Style: "default" (stock Stream Deck look) or "duotone" (Duotone Essentials colours), as in Foreground Boost.
@@ -253,7 +235,6 @@
 	}
 	for (const id of ['style', 'duoPreset', 'duoBg', 'duoAccent']) $(id).addEventListener('change', () => { settings[id] = $(id).value; styleToUi(); saveSettings(); });
 
-	$('pick').onchange = () => setRule($('pick').value === 'new' ? 0 : Number($('pick').value));
 	$('threshold').oninput = () => { config.settings.threshold = $('threshold').value / 100; $('thresholdPct').textContent = $('threshold').value + '%'; };
 	$('threshold').onchange = save;
 	for (const k of ['attack_ms', 'hold_ms', 'release_ms']) {
