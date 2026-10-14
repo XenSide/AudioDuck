@@ -108,7 +108,7 @@
 	function send(event, payload) {
 		if (ws && ws.readyState === 1) ws.send(JSON.stringify({ event, context: uuid, payload }));
 	}
-	const save = () => send('sendToPlugin', { config });
+	const save = () => send('sendToPlugin', { config, rule: settings.rule }); // the key's rule: the plugin deletes rules no key uses
 	const saveSettings = () => send('setSettings', settings);
 
 	function setRule(id) {
@@ -120,7 +120,7 @@
 	function summary(r) {
 		const listed = r.targets.map(pretty).join(', ');
 		const targets = r.all_others ? (listed ? 'all except ' + listed : 'all others') : listed;
-		return r.sources.map(pretty).join(', ') + ' → ' + targets + ' (' + Math.round(r.level * 100) + '%)';
+		return (r.enabled ? 'On: ' : 'Off: ') + r.sources.map(pretty).join(', ') + ' → ' + targets + ' (' + Math.round(r.level * 100) + '%)';
 	}
 
 	function renderConfig() {
@@ -220,6 +220,7 @@
 				if (i < 0) config.rules.push(rule); else config.rules[i] = rule;
 				draftFor = ed.id;
 				ed.saved = true;
+				if (isNew) settings.rule = ed.id; // before save(), so the new rule arrives with its key
 				save();
 				if (isNew) setRule(ed.id); else renderConfig();
 			}
