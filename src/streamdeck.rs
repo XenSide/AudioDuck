@@ -1,17 +1,24 @@
 //! Stream Deck (and OpenDeck) side. One key action, one rule per key (settings `{"rule": id, style…}`): a tap turns the rule
 //! off and on, the image (see keyimage.rs) shows its state, and the property inspector edits it (plus the shared timings
 //! and the key's style) and shows live levels.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::TcpStream;
+use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tungstenite::{Message, WebSocket};
+use windows::Win32::Foundation::WAIT_OBJECT_0;
+use windows::Win32::Storage::FileSystem::{FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FindFirstChangeNotificationW, FindNextChangeNotification};
+use windows::Win32::System::Threading::{INFINITE, WaitForMultipleObjects};
+use windows::core::HSTRING;
 
 use crate::keyimage::{Icons, State, key_image};
 use crate::{Config, SharedRef, save_config};
 
 const POLL: Duration = Duration::from_millis(250);
+const ACTION: &str = "com.xenside.audioduck.rule";
 
 type Ws = WebSocket<TcpStream>;
 
@@ -76,6 +83,69 @@ fn set_config(shared: &SharedRef, change: impl FnOnce(&mut Config)) {
     save_config(&sh.config);
 }
 
+/// Adds the rule id of every AudioDuck key in a profile manifest.
+fn collect(v: &Value, ids: &mut HashSet<u64>) {
+    match v {
+        Value::Object(m) => {
+            if m.get("UUID").and_then(Value::as_str) == Some(ACTION)
+                && let Some(id) = m.get("Settings").and_then(|s| s["rule"].as_u64())
+            {
+                ids.insert(id);
+            }
+            m.values().for_each(|x| collect(x, ids));
+        }
+        Value::Array(a) => a.iter().for_each(|x| collect(x, ids)),
+        _ => {}
+    }
+}
+
+fn profile_dirs() -> Vec<PathBuf> {
+    let root = PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("Elgato").join("StreamDeck");
+    vec![root.join("ProfilesV3"), root.join("ProfilesV2")]
+}
+
+/// Sleeps until Windows reports Stream Deck writing a profile (right after a key is added, changed or deleted), then
+/// sends a note. Runs until the plugin side is gone.
+fn watch_profiles(changed: mpsc::Sender<()>) {
+    let filter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE;
+    let handles: Vec<_> = profile_dirs().iter().filter_map(|d| unsafe { FindFirstChangeNotificationW(&HSTRING::from(d.as_path()), true, filter) }.ok()).collect();
+    if handles.is_empty() {
+        return;
+    }
+    loop {
+        let i = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) }.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
+        if i >= handles.len() || changed.send(()).is_err() {
+            return;
+        }
+        let _ = unsafe { FindNextChangeNotification(handles[i]) };
+    }
+}
+
+/// Rule ids the keys in Stream Deck's saved profiles (every device, page and profile) point at. None when they can't
+/// all be read (a profile half-written, or none at all), so nothing gets deleted on a bad read.
+fn profile_rules() -> Option<HashSet<u64>> {
+    let (mut ids, mut read_any) = (HashSet::new(), false);
+    let mut dirs = profile_dirs();
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for path in entries.flatten().map(|e| e.path()) {
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.file_name().is_some_and(|n| n == "manifest.json") {
+                collect(&serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?, &mut ids);
+                read_any = true;
+            }
+        }
+    }
+    read_any.then_some(ids)
+}
+
+/// Whether the host is Elgato's Stream Deck app (whose profiles `profile_rules` reads), not OpenDeck.
+fn hosted_by_stream_deck() -> bool {
+    let procs = crate::audio::processes();
+    procs.get(&std::process::id()).and_then(|(_, parent)| procs.get(parent)).is_some_and(|(name, _)| name == "streamdeck.exe")
+}
+
 /// Talks to Stream Deck until it disconnects.
 pub fn run(a: Args, shared: &SharedRef) {
     let Ok(stream) = TcpStream::connect(("127.0.0.1", a.port)) else { return };
@@ -87,6 +157,13 @@ pub fn run(a: Args, shared: &SharedRef) {
     let mut icons = Icons::default();
     let mut inspector: Option<(String, String)> = None; // (action, context) of the open property inspector
     let mut sent_rev = None; // config revision the open inspector has
+    // The keys are the rules: a rule no key points at is deleted as soon as Stream Deck saves the profile without it.
+    let prune = hosted_by_stream_deck();
+    let (changed_tx, changed) = mpsc::channel();
+    if prune {
+        std::thread::spawn(move || watch_profiles(changed_tx));
+    }
+    let mut dirty = prune; // re-check which rules keys use
     loop {
         match ws.read() {
             Ok(Message::Text(t)) => {
@@ -98,9 +175,11 @@ pub fn run(a: Args, shared: &SharedRef) {
                         // Earlier versions titled the key; the image carries everything now.
                         send(&mut ws, json!({ "event": "setTitle", "context": ctx, "payload": { "title": "", "target": 0 } }));
                         keys.insert(ctx, (v["payload"]["settings"].clone(), String::new()));
+                        dirty = prune;
                     }
                     "willDisappear" => {
                         keys.remove(&ctx);
+                        dirty = prune;
                     }
                     "keyUp" => {
                         let id = keys.get(&ctx).and_then(|k| k.0["rule"].as_u64()).unwrap_or(0);
@@ -127,7 +206,13 @@ pub fn run(a: Args, shared: &SharedRef) {
                     "sendToPlugin" => {
                         // The inspector sends the whole config on every change, or {} when it loads and wants it.
                         if let Ok(config) = serde_json::from_value::<Config>(v["payload"]["config"].clone()) {
+                            // The key's rule comes along, so a rule just created isn't taken as keyless before the
+                            // key's new settings reach us.
+                            if let (Some(rule), Some(k)) = (v["payload"]["rule"].as_u64(), keys.get_mut(&ctx)) {
+                                k.0["rule"] = rule.into();
+                            }
                             set_config(shared, |c| *c = config);
+                            dirty = prune;
                         } else {
                             sent_rev = None;
                         }
@@ -145,6 +230,17 @@ pub fn run(a: Args, shared: &SharedRef) {
             if now != *shown {
                 send(&mut ws, json!({ "event": "setImage", "context": ctx, "payload": { "image": now, "target": 0 } }));
                 *shown = now;
+            }
+        }
+        if changed.try_iter().count() > 0 {
+            dirty = true;
+        }
+        // A failed read (Stream Deck mid-write) leaves `dirty` set: retried next tick.
+        if dirty && let Some(mut used) = profile_rules() {
+            dirty = false;
+            used.extend(keys.values().filter_map(|k| k.0["rule"].as_u64()));
+            if shared.lock().unwrap().config.rules.iter().any(|r| !used.contains(&r.id)) {
+                set_config(shared, |c| c.rules.retain(|r| used.contains(&r.id)));
             }
         }
         if let Some((action, ctx)) = &inspector {
@@ -165,6 +261,19 @@ pub fn run(a: Args, shared: &SharedRef) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn collect_finds_rule_keys_at_any_depth() {
+        let page = serde_json::json!({ "Controllers": [{ "Actions": {
+            "0,0": { "UUID": "com.xenside.audioduck.rule", "Settings": { "rule": 3 } },
+            "1,0": { "UUID": "com.xenside.audioduck.rule", "Settings": {} },
+            "2,0": { "UUID": "com.elgato.discord.mute", "Settings": { "rule": 9 } },
+            "3,0": { "UUID": "com.elgato.streamdeck.multiactions", "Settings": {}, "Actions": [[{ "UUID": "com.xenside.audioduck.rule", "Settings": { "rule": 1 } }]] }
+        } }] });
+        let mut ids = std::collections::HashSet::new();
+        super::collect(&page, &mut ids);
+        assert_eq!(ids, [1, 3].into());
+    }
+
     #[test]
     fn base64_matches_rfc4648() {
         for (i, o) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")] {
