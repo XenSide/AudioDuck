@@ -112,9 +112,6 @@
 	const saveSettings = () => send('setSettings', settings);
 
 	function setRule(id) {
-		// The rule this key leaves would keep ducking with no key to show it or turn it off: turn it off.
-		const left = ruleOf();
-		if (left && left.id !== id && left.enabled) { left.enabled = false; save(); }
 		settings.rule = id;
 		saveSettings();
 		renderConfig();
