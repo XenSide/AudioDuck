@@ -1,7 +1,7 @@
-//! Stream Deck (and OpenDeck) side. One key action, one rule per key (settings `{"rule": id, style…}`): a tap turns the rule
-//! off and on, the image (see keyimage.rs) shows its state, and the property inspector edits it (plus the shared timings
-//! and the key's style) and shows live levels.
-use std::collections::{HashMap, HashSet};
+//! Stream Deck (and OpenDeck) side. One key action; a key's settings are what it does (`engine::Rule` fields plus its
+//! style). A tap turns the key off and on, the image (see keyimage.rs) shows its state, and the property inspector edits
+//! it (plus the shared timings and the key's style) and shows live levels.
+use std::collections::HashMap;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -15,6 +15,7 @@ use windows::Win32::System::Threading::{INFINITE, WaitForMultipleObjects};
 use windows::core::HSTRING;
 
 use crate::keyimage::{Icons, State, key_image};
+use crate::engine::Rule;
 use crate::{Config, SharedRef, save_config};
 
 const POLL: Duration = Duration::from_millis(250);
@@ -53,48 +54,48 @@ fn send(ws: &mut Ws, v: Value) {
     let _ = ws.send(Message::text(v.to_string()));
 }
 
-/// The key's image for its settings (`rule` id and style).
+/// What a key does, from its settings.
+fn setup(settings: &Value) -> Rule {
+    serde_json::from_value(settings.clone()).unwrap_or_default()
+}
+
+/// Whether a key has been given something to do (until then it shows "Set up" and does nothing).
+fn is_set_up(r: &Rule) -> bool {
+    !r.sources.is_empty() && (r.all_others || !r.targets.is_empty())
+}
+
+/// The key's image for its settings.
 fn image(shared: &SharedRef, icons: &mut Icons, settings: &Value) -> String {
-    let id = settings["rule"].as_u64().unwrap_or(0);
-    let (state, app, level) = {
-        let sh = shared.lock().unwrap();
-        match sh.config.rules.iter().find(|r| r.id == id) {
-            None => (State::SetUp, String::new(), 0.0),
-            Some(r) => {
-                let state = if !r.enabled {
-                    State::Off
-                } else if sh.live.active_rules.contains(&id) {
-                    State::Ducking
-                } else {
-                    State::Listening
-                };
-                (state, r.sources.first().cloned().unwrap_or_default(), r.level)
-            }
-        }
+    let r = setup(settings);
+    let state = if !is_set_up(&r) {
+        State::SetUp
+    } else if !r.enabled {
+        State::Off
+    } else if shared.lock().unwrap().live.active.contains(&r) {
+        State::Ducking // identical keys do the same thing, so they show the same state
+    } else {
+        State::Listening
     };
-    key_image(icons, settings, state, &app, level)
+    key_image(icons, settings, state, r.sources.first().map_or("", |s| s), r.level)
 }
 
 fn set_config(shared: &SharedRef, change: impl FnOnce(&mut Config)) {
     let mut sh = shared.lock().unwrap();
     change(&mut sh.config);
-    sh.config.ensure_ids(); // rules new from the inspector have no id yet
     sh.rev += 1;
     save_config(&sh.config);
 }
 
-/// Adds the rule id of every AudioDuck key in a profile manifest.
-fn collect(v: &Value, ids: &mut HashSet<u64>) {
+/// Adds the settings of every AudioDuck key in a profile manifest.
+fn collect(v: &Value, out: &mut Vec<Value>) {
     match v {
         Value::Object(m) => {
-            if m.get("UUID").and_then(Value::as_str) == Some(ACTION)
-                && let Some(id) = m.get("Settings").and_then(|s| s["rule"].as_u64())
-            {
-                ids.insert(id);
+            if m.get("UUID").and_then(Value::as_str) == Some(ACTION) {
+                out.push(m.get("Settings").cloned().unwrap_or_default());
             }
-            m.values().for_each(|x| collect(x, ids));
+            m.values().for_each(|x| collect(x, out));
         }
-        Value::Array(a) => a.iter().for_each(|x| collect(x, ids)),
+        Value::Array(a) => a.iter().for_each(|x| collect(x, out)),
         _ => {}
     }
 }
@@ -121,10 +122,10 @@ fn watch_profiles(changed: mpsc::Sender<()>) {
     }
 }
 
-/// Rule ids the keys in Stream Deck's saved profiles (every device, page and profile) point at. None when they can't
-/// all be read (a profile half-written, or none at all), so nothing gets deleted on a bad read.
-fn profile_rules() -> Option<HashSet<u64>> {
-    let (mut ids, mut read_any) = (HashSet::new(), false);
+/// Settings of every AudioDuck key in Stream Deck's saved profiles (every device, page and profile). None when they
+/// can't all be read (a profile half-written, or none at all), so a bad read never silences ducking.
+fn saved_keys() -> Option<Vec<Value>> {
+    let (mut out, mut read_any) = (vec![], false);
     let mut dirs = profile_dirs();
     while let Some(dir) = dirs.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
@@ -132,18 +133,45 @@ fn profile_rules() -> Option<HashSet<u64>> {
             if path.is_dir() {
                 dirs.push(path);
             } else if path.file_name().is_some_and(|n| n == "manifest.json") {
-                collect(&serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?, &mut ids);
+                collect(&serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?, &mut out);
                 read_any = true;
             }
         }
     }
-    read_any.then_some(ids)
+    read_any.then_some(out)
+}
+
+/// Every key's settings: the saved ones, with each on-screen key's live settings (`current`) in place of its saved copy
+/// (`on_disk`, which may lag behind a tap or an edit until Stream Deck saves). Once that copy is gone, Stream Deck has
+/// saved the change and `on_disk` catches up. A leftover identical copy is harmless: identical keys do the same thing.
+fn merge<'a>(mut saved: Vec<Value>, keys: impl IntoIterator<Item = (&'a mut Value, &'a Value)>) -> Vec<Value> {
+    let mut out = vec![];
+    for (on_disk, current) in keys {
+        if let Some(i) = saved.iter().position(|s| s == on_disk) {
+            saved.swap_remove(i);
+        } else {
+            *on_disk = current.clone();
+            if let Some(i) = saved.iter().position(|s| s == current) {
+                saved.swap_remove(i);
+            }
+        }
+        out.push(current.clone());
+    }
+    out.extend(saved);
+    out
 }
 
 /// Whether the host is Elgato's Stream Deck app (whose profiles `profile_rules` reads), not OpenDeck.
 fn hosted_by_stream_deck() -> bool {
     let procs = crate::audio::processes();
     procs.get(&std::process::id()).and_then(|(_, parent)| procs.get(parent)).is_some_and(|(name, _)| name == "streamdeck.exe")
+}
+
+/// An on-screen key.
+struct Key {
+    settings: Value,
+    on_disk: Value, // its settings as of when it appeared, until Stream Deck has saved a change (see `merge`)
+    shown: String,  // image last sent
 }
 
 /// Talks to Stream Deck until it disconnects.
@@ -153,68 +181,70 @@ pub fn run(a: Args, shared: &SharedRef) {
     let Ok((mut ws, _)) = tungstenite::client(format!("ws://127.0.0.1:{}", a.port), stream) else { return };
     send(&mut ws, json!({ "event": a.event, "uuid": a.uuid }));
 
-    let mut keys: HashMap<String, (Value, String)> = HashMap::new(); // visible keys -> settings, image shown
+    let mut keys: HashMap<String, Key> = HashMap::new();
     let mut icons = Icons::default();
     let mut inspector: Option<(String, String)> = None; // (action, context) of the open property inspector
     let mut sent_rev = None; // config revision the open inspector has
-    // The keys are the rules: a rule no key points at is deleted as soon as Stream Deck saves the profile without it.
-    let prune = hosted_by_stream_deck();
+    let mut sent_settings = Value::Null; // key settings the open inspector has
+    // Keys on other pages and profiles come from Stream Deck's saved profiles, re-read whenever Windows reports Stream
+    // Deck saving one (a key added, changed or deleted). Elgato's app only: elsewhere, on-screen keys only.
+    let from_profiles = hosted_by_stream_deck();
     let (changed_tx, changed) = mpsc::channel();
-    if prune {
+    if from_profiles {
         std::thread::spawn(move || watch_profiles(changed_tx));
     }
-    let mut dirty = prune; // re-check which rules keys use
+    let mut dirty = true; // the list of what every key does needs rebuilding
     loop {
         match ws.read() {
             Ok(Message::Text(t)) => {
                 let Ok(v) = serde_json::from_str::<Value>(&t) else { continue };
                 let ctx = v["context"].as_str().unwrap_or_default().to_string();
                 let action = v["action"].as_str().unwrap_or_default().to_string();
+                let settings = v["payload"]["settings"].clone();
                 match v["event"].as_str().unwrap_or_default() {
-                    "willAppear" | "didReceiveSettings" => {
+                    "willAppear" => {
                         // Earlier versions titled the key; the image carries everything now.
                         send(&mut ws, json!({ "event": "setTitle", "context": ctx, "payload": { "title": "", "target": 0 } }));
-                        keys.insert(ctx, (v["payload"]["settings"].clone(), String::new()));
-                        dirty = prune;
+                        keys.insert(ctx, Key { on_disk: settings.clone(), settings, shown: String::new() });
+                        dirty = true;
+                    }
+                    "didReceiveSettings" => {
+                        if let Some(k) = keys.get_mut(&ctx) {
+                            k.settings = settings;
+                            dirty = true;
+                        }
                     }
                     "willDisappear" => {
                         keys.remove(&ctx);
-                        dirty = prune;
+                        dirty = true;
                     }
-                    "keyUp" => {
-                        let id = keys.get(&ctx).and_then(|k| k.0["rule"].as_u64()).unwrap_or(0);
-                        let mut found = false;
-                        set_config(shared, |c| {
-                            if let Some(r) = c.rules.iter_mut().find(|r| r.id == id) {
-                                r.enabled = !r.enabled;
-                                found = true;
-                            }
-                        });
-                        if !found {
-                            send(&mut ws, json!({ "event": "showAlert", "context": ctx })); // not set up yet
+                    "keyUp" => match keys.get_mut(&ctx) {
+                        Some(k) if is_set_up(&setup(&k.settings)) => {
+                            let on = setup(&k.settings).enabled;
+                            k.settings["enabled"] = (!on).into();
+                            let settings = k.settings.clone();
+                            send(&mut ws, json!({ "event": "setSettings", "context": ctx, "payload": settings }));
+                            dirty = true;
                         }
-                    }
+                        _ => send(&mut ws, json!({ "event": "showAlert", "context": ctx })), // not set up yet
+                    },
                     "propertyInspectorDidAppear" => {
                         shared.lock().unwrap().inspector_open = true;
                         inspector = Some((action, ctx));
                         sent_rev = None;
+                        sent_settings = Value::Null;
                     }
                     "propertyInspectorDidDisappear" => {
                         shared.lock().unwrap().inspector_open = false;
                         inspector = None;
                     }
                     "sendToPlugin" => {
-                        // The inspector sends the whole config on every change, or {} when it loads and wants it.
+                        // The inspector sends the shared timings on every change, or {} when it loads and wants them.
                         if let Ok(config) = serde_json::from_value::<Config>(v["payload"]["config"].clone()) {
-                            // The key's rule comes along, so a rule just created isn't taken as keyless before the
-                            // key's new settings reach us.
-                            if let (Some(rule), Some(k)) = (v["payload"]["rule"].as_u64(), keys.get_mut(&ctx)) {
-                                k.0["rule"] = rule.into();
-                            }
                             set_config(shared, |c| *c = config);
-                            dirty = prune;
                         } else {
                             sent_rev = None;
+                            sent_settings = Value::Null;
                         }
                     }
                     _ => {}
@@ -225,22 +255,31 @@ pub fn run(a: Args, shared: &SharedRef) {
             Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
             Err(_) => return, // Stream Deck closed the connection
         }
-        for (ctx, (settings, shown)) in keys.iter_mut() {
-            let now = image(shared, &mut icons, settings);
-            if now != *shown {
-                send(&mut ws, json!({ "event": "setImage", "context": ctx, "payload": { "image": now, "target": 0 } }));
-                *shown = now;
-            }
-        }
         if changed.try_iter().count() > 0 {
             dirty = true;
         }
-        // A failed read (Stream Deck mid-write) leaves `dirty` set: retried next tick.
-        if dirty && let Some(mut used) = profile_rules() {
-            dirty = false;
-            used.extend(keys.values().filter_map(|k| k.0["rule"].as_u64()));
-            if shared.lock().unwrap().config.rules.iter().any(|r| !used.contains(&r.id)) {
-                set_config(shared, |c| c.rules.retain(|r| used.contains(&r.id)));
+        if dirty {
+            let all = if from_profiles {
+                saved_keys().map(|saved| merge(saved, keys.values_mut().map(|k| (&mut k.on_disk, &k.settings))))
+            } else {
+                Some(keys.values().map(|k| k.settings.clone()).collect())
+            };
+            // A failed read (Stream Deck mid-write) keeps the last list and `dirty`: retried next tick.
+            if let Some(all) = all {
+                dirty = false;
+                let rules: Vec<Rule> = all.iter().map(setup).filter(is_set_up).collect();
+                let mut sh = shared.lock().unwrap();
+                if sh.rules != rules {
+                    sh.rules = rules;
+                    sh.rev += 1;
+                }
+            }
+        }
+        for (ctx, k) in keys.iter_mut() {
+            let now = image(shared, &mut icons, &k.settings);
+            if now != k.shown {
+                send(&mut ws, json!({ "event": "setImage", "context": ctx, "payload": { "image": now, "target": 0 } }));
+                k.shown = now;
             }
         }
         if let Some((action, ctx)) = &inspector {
@@ -250,8 +289,16 @@ pub fn run(a: Args, shared: &SharedRef) {
                 let sh = shared.lock().unwrap();
                 payload["live"] = serde_json::to_value(&sh.live).unwrap_or_default();
                 if sent_rev != Some(sh.rev) {
-                    sent_rev = Some(sh.rev); // config changed (here, by a key, or by the inspector itself): resend it
+                    sent_rev = Some(sh.rev); // config changed (here or by the inspector itself): resend it
                     payload["config"] = serde_json::to_value(&sh.config).unwrap_or_default();
+                }
+                if let Some(k) = keys.get(&ctx) {
+                    let r = setup(&k.settings);
+                    payload["ducking"] = (r.enabled && is_set_up(&r) && sh.live.active.contains(&r)).into();
+                    if k.settings != sent_settings {
+                        sent_settings = k.settings.clone(); // e.g. a tap turned it off: the inspector must not undo that
+                        payload["settings"] = sent_settings.clone();
+                    }
                 }
             }
             send(&mut ws, json!({ "event": "sendToPropertyInspector", "action": action, "context": ctx, "payload": payload }));
@@ -261,17 +308,33 @@ pub fn run(a: Args, shared: &SharedRef) {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     #[test]
-    fn collect_finds_rule_keys_at_any_depth() {
-        let page = serde_json::json!({ "Controllers": [{ "Actions": {
-            "0,0": { "UUID": "com.xenside.audioduck.rule", "Settings": { "rule": 3 } },
-            "1,0": { "UUID": "com.xenside.audioduck.rule", "Settings": {} },
-            "2,0": { "UUID": "com.elgato.discord.mute", "Settings": { "rule": 9 } },
-            "3,0": { "UUID": "com.elgato.streamdeck.multiactions", "Settings": {}, "Actions": [[{ "UUID": "com.xenside.audioduck.rule", "Settings": { "rule": 1 } }]] }
+    fn collect_finds_keys_at_any_depth() {
+        let page = json!({ "Controllers": [{ "Actions": {
+            "0,0": { "UUID": "com.xenside.audioduck.rule", "Settings": { "sources": ["discord.exe"] } },
+            "1,0": { "UUID": "com.elgato.discord.mute", "Settings": { "sources": ["x.exe"] } },
+            "2,0": { "UUID": "com.elgato.streamdeck.multiactions", "Settings": {}, "Actions": [[{ "UUID": "com.xenside.audioduck.rule", "Settings": { "level": 0.5 } }]] }
         } }] });
-        let mut ids = std::collections::HashSet::new();
-        super::collect(&page, &mut ids);
-        assert_eq!(ids, [1, 3].into());
+        let mut out = vec![];
+        super::collect(&page, &mut out);
+        assert_eq!(out.len(), 2);
+        assert!(out.contains(&json!({ "sources": ["discord.exe"] })) && out.contains(&json!({ "level": 0.5 })));
+    }
+
+    #[test]
+    fn merge_prefers_live_settings_and_catches_up_once_saved() {
+        let (old, new, other) = (json!({ "enabled": true }), json!({ "enabled": false }), json!({ "level": 0.5 }));
+        // Tapped off, not saved yet: the stale saved copy is replaced, the hidden key stays.
+        let mut on_disk = old.clone();
+        assert_eq!(super::merge(vec![old.clone(), other.clone()], [(&mut on_disk, &new)]), [new.clone(), other.clone()]);
+        assert_eq!(on_disk, old);
+        // Saved: on_disk catches up and the saved copy isn't counted twice.
+        assert_eq!(super::merge(vec![new.clone(), other.clone()], [(&mut on_disk, &new)]), [new.clone(), other.clone()]);
+        assert_eq!(on_disk, new);
+        // Deleted: gone from the profile and off screen.
+        assert_eq!(super::merge(vec![other.clone()], []), [other]);
     }
 
     #[test]

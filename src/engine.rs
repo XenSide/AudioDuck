@@ -4,9 +4,8 @@ use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+/// What one Stream Deck key does; it is that key's settings (plus its style fields, ignored here).
 pub struct Rule {
-    /// Stable across edits and reorders, so a Stream Deck key can point at this rule. 0 = not assigned yet.
-    pub id: u64,
     pub sources: Vec<String>,
     /// Apps to duck; with `all_others`, apps to leave alone.
     pub targets: Vec<String>,
@@ -21,7 +20,7 @@ pub struct Rule {
 
 impl Default for Rule {
     fn default() -> Self {
-        Self { id: 0, sources: vec![], targets: vec![], all_others: false, level: 0.2, enabled: true }
+        Self { sources: vec![], targets: vec![], all_others: false, level: 0.2, enabled: true }
     }
 }
 
