@@ -20,7 +20,7 @@ fn main() {
     let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
     let state = std::env::temp_dir().join("audioduck-latency-state.json");
     let mut mixer = audio::Mixer::new(state);
-    let rules = vec![engine::Rule { id: 1, sources: vec![source.clone()], targets: vec!["nonexistent-target.exe".into()], ..Default::default() }];
+    let rules = vec![engine::Rule { sources: vec![source.clone()], targets: vec!["nonexistent-target.exe".into()], ..Default::default() }];
     let settings = engine::Settings::default();
     let mut ducker = engine::Ducker::default();
     let (tick, refresh_every) = (Duration::from_millis(30), Duration::from_secs(1));

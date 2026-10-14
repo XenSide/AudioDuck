@@ -2,7 +2,7 @@
 	"Name": "AudioDuck",
 	"Version": "2.0.0.0",
 	"Author": "xenside",
-	"Description": "Per-app audio ducking: when one app plays (e.g. Discord), others get quieter. Each key is one rule, set up in its settings; tapping the key turns that rule off and on, and its colour shows whether the rule is off, listening or ducking right now. Runs while Stream Deck runs.",
+	"Description": "Per-app audio ducking: when one app plays (e.g. Discord), others get quieter. Each key is set up in its own settings; tapping it turns it off and on, and its colour shows whether it is off, listening or ducking right now. Runs while Stream Deck runs.",
 	"Category": "AudioDuck",
 	"CategoryIcon": "imgs/plugin/icon",
 	"Icon": "imgs/plugin/icon",
@@ -21,9 +21,9 @@
 	"Actions": [
 		{
 			"UUID": "com.xenside.audioduck.rule",
-			"Name": "Ducking Rule",
+			"Name": "Ducking",
 			"Icon": "imgs/actions/toggle/icon",
-			"Tooltip": "One ducking rule per key: set it up in the key settings, tap to turn it off and on.",
+			"Tooltip": "Set up which apps trigger ducking and which get quieter in the key settings; tap to turn it off and on.",
 			"Controllers": [
 				"Keypad"
 			],
