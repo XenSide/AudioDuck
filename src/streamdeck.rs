@@ -4,13 +4,14 @@
 use std::collections::{HashMap, HashSet};
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tungstenite::{Message, WebSocket};
-use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::WAIT_OBJECT_0;
 use windows::Win32::Storage::FileSystem::{FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FindFirstChangeNotificationW, FindNextChangeNotification};
-use windows::Win32::System::Threading::WaitForSingleObject;
+use windows::Win32::System::Threading::{INFINITE, WaitForMultipleObjects};
 use windows::core::HSTRING;
 
 use crate::keyimage::{Icons, State, key_image};
@@ -103,10 +104,21 @@ fn profile_dirs() -> Vec<PathBuf> {
     vec![root.join("ProfilesV3"), root.join("ProfilesV2")]
 }
 
-/// Signalled whenever Stream Deck writes a profile, i.e. right after a key is added, changed or deleted.
-fn watch_profiles() -> Vec<HANDLE> {
+/// Sleeps until Windows reports Stream Deck writing a profile (right after a key is added, changed or deleted), then
+/// sends a note. Runs until the plugin side is gone.
+fn watch_profiles(changed: mpsc::Sender<()>) {
     let filter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE;
-    profile_dirs().iter().filter_map(|d| unsafe { FindFirstChangeNotificationW(&HSTRING::from(d.as_path()), true, filter) }.ok()).collect()
+    let handles: Vec<_> = profile_dirs().iter().filter_map(|d| unsafe { FindFirstChangeNotificationW(&HSTRING::from(d.as_path()), true, filter) }.ok()).collect();
+    if handles.is_empty() {
+        return;
+    }
+    loop {
+        let i = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) }.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
+        if i >= handles.len() || changed.send(()).is_err() {
+            return;
+        }
+        let _ = unsafe { FindNextChangeNotification(handles[i]) };
+    }
 }
 
 /// Rule ids the keys in Stream Deck's saved profiles (every device, page and profile) point at. None when they can't
@@ -147,7 +159,10 @@ pub fn run(a: Args, shared: &SharedRef) {
     let mut sent_rev = None; // config revision the open inspector has
     // The keys are the rules: a rule no key points at is deleted as soon as Stream Deck saves the profile without it.
     let prune = hosted_by_stream_deck();
-    let watches = if prune { watch_profiles() } else { vec![] };
+    let (changed_tx, changed) = mpsc::channel();
+    if prune {
+        std::thread::spawn(move || watch_profiles(changed_tx));
+    }
     let mut dirty = prune; // re-check which rules keys use
     loop {
         match ws.read() {
@@ -217,11 +232,8 @@ pub fn run(a: Args, shared: &SharedRef) {
                 *shown = now;
             }
         }
-        for &w in &watches {
-            if unsafe { WaitForSingleObject(w, 0) } == WAIT_OBJECT_0 {
-                dirty = true;
-                let _ = unsafe { FindNextChangeNotification(w) };
-            }
+        if changed.try_iter().count() > 0 {
+            dirty = true;
         }
         // A failed read (Stream Deck mid-write) leaves `dirty` set: retried next tick.
         if dirty && let Some(mut used) = profile_rules() {
