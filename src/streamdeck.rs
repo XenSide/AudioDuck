@@ -4,16 +4,19 @@
 use std::collections::{HashMap, HashSet};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tungstenite::{Message, WebSocket};
+use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Storage::FileSystem::{FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FindFirstChangeNotificationW, FindNextChangeNotification};
+use windows::Win32::System::Threading::WaitForSingleObject;
+use windows::core::HSTRING;
 
 use crate::keyimage::{Icons, State, key_image};
 use crate::{Config, SharedRef, save_config};
 
 const POLL: Duration = Duration::from_millis(250);
-const PRUNE: Duration = Duration::from_secs(5);
 const ACTION: &str = "com.xenside.audioduck.rule";
 
 type Ws = WebSocket<TcpStream>;
@@ -95,12 +98,22 @@ fn collect(v: &Value, ids: &mut HashSet<u64>) {
     }
 }
 
+fn profile_dirs() -> Vec<PathBuf> {
+    let root = PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("Elgato").join("StreamDeck");
+    vec![root.join("ProfilesV3"), root.join("ProfilesV2")]
+}
+
+/// Signalled whenever Stream Deck writes a profile, i.e. right after a key is added, changed or deleted.
+fn watch_profiles() -> Vec<HANDLE> {
+    let filter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE;
+    profile_dirs().iter().filter_map(|d| unsafe { FindFirstChangeNotificationW(&HSTRING::from(d.as_path()), true, filter) }.ok()).collect()
+}
+
 /// Rule ids the keys in Stream Deck's saved profiles (every device, page and profile) point at. None when they can't
 /// all be read (a profile half-written, or none at all), so nothing gets deleted on a bad read.
 fn profile_rules() -> Option<HashSet<u64>> {
-    let root = PathBuf::from(std::env::var_os("APPDATA")?).join("Elgato").join("StreamDeck");
     let (mut ids, mut read_any) = (HashSet::new(), false);
-    let mut dirs = vec![root.join("ProfilesV3"), root.join("ProfilesV2")];
+    let mut dirs = profile_dirs();
     while let Some(dir) = dirs.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for path in entries.flatten().map(|e| e.path()) {
@@ -132,10 +145,10 @@ pub fn run(a: Args, shared: &SharedRef) {
     let mut icons = Icons::default();
     let mut inspector: Option<(String, String)> = None; // (action, context) of the open property inspector
     let mut sent_rev = None; // config revision the open inspector has
-    // The keys are the rules: a rule no key points at is deleted (after two checks in a row, so a key just set up
-    // in the inspector isn't caught before Stream Deck saves its profile).
+    // The keys are the rules: a rule no key points at is deleted as soon as Stream Deck saves the profile without it.
     let prune = hosted_by_stream_deck();
-    let (mut last_prune, mut unused_before) = (Instant::now(), HashSet::new());
+    let watches = if prune { watch_profiles() } else { vec![] };
+    let mut dirty = prune; // re-check which rules keys use
     loop {
         match ws.read() {
             Ok(Message::Text(t)) => {
@@ -147,9 +160,11 @@ pub fn run(a: Args, shared: &SharedRef) {
                         // Earlier versions titled the key; the image carries everything now.
                         send(&mut ws, json!({ "event": "setTitle", "context": ctx, "payload": { "title": "", "target": 0 } }));
                         keys.insert(ctx, (v["payload"]["settings"].clone(), String::new()));
+                        dirty = prune;
                     }
                     "willDisappear" => {
                         keys.remove(&ctx);
+                        dirty = prune;
                     }
                     "keyUp" => {
                         let id = keys.get(&ctx).and_then(|k| k.0["rule"].as_u64()).unwrap_or(0);
@@ -176,7 +191,13 @@ pub fn run(a: Args, shared: &SharedRef) {
                     "sendToPlugin" => {
                         // The inspector sends the whole config on every change, or {} when it loads and wants it.
                         if let Ok(config) = serde_json::from_value::<Config>(v["payload"]["config"].clone()) {
+                            // The key's rule comes along, so a rule just created isn't taken as keyless before the
+                            // key's new settings reach us.
+                            if let (Some(rule), Some(k)) = (v["payload"]["rule"].as_u64(), keys.get_mut(&ctx)) {
+                                k.0["rule"] = rule.into();
+                            }
                             set_config(shared, |c| *c = config);
+                            dirty = prune;
                         } else {
                             sent_rev = None;
                         }
@@ -196,15 +217,18 @@ pub fn run(a: Args, shared: &SharedRef) {
                 *shown = now;
             }
         }
-        if prune && last_prune.elapsed() >= PRUNE {
-            last_prune = Instant::now();
-            if let Some(mut used) = profile_rules() {
-                used.extend(keys.values().filter_map(|k| k.0["rule"].as_u64()));
-                let unused: HashSet<u64> = shared.lock().unwrap().config.rules.iter().map(|r| r.id).filter(|id| !used.contains(id)).collect();
-                if unused.iter().any(|id| unused_before.contains(id)) {
-                    set_config(shared, |c| c.rules.retain(|r| !(unused.contains(&r.id) && unused_before.contains(&r.id))));
-                }
-                unused_before = unused;
+        for &w in &watches {
+            if unsafe { WaitForSingleObject(w, 0) } == WAIT_OBJECT_0 {
+                dirty = true;
+                let _ = unsafe { FindNextChangeNotification(w) };
+            }
+        }
+        // A failed read (Stream Deck mid-write) leaves `dirty` set: retried next tick.
+        if dirty && let Some(mut used) = profile_rules() {
+            dirty = false;
+            used.extend(keys.values().filter_map(|k| k.0["rule"].as_u64()));
+            if shared.lock().unwrap().config.rules.iter().any(|r| !used.contains(&r.id)) {
+                set_config(shared, |c| c.rules.retain(|r| used.contains(&r.id)));
             }
         }
         if let Some((action, ctx)) = &inspector {
