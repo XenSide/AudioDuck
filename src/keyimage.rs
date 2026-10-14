@@ -211,7 +211,8 @@ pub fn key_image(icons: &mut Icons, settings: &Value, state: State, app: &str, l
         (_, Some(png)) => p.push(format!(r#"<image x="40" y="14" width="64" height="64" opacity="{opacity}" href="data:image/png;base64,{png}"/>"#)),
         (_, None) => {
             // App not seen running yet: its name instead of the icon.
-            let name: String = app.trim_end_matches(".exe").chars().take(9).collect();
+            let mut chars = app.trim_end_matches(".exe").chars().take(9);
+            let name: String = chars.next().into_iter().flat_map(char::to_uppercase).chain(chars).collect();
             p.push(format!(r#"<text x="72" y="54" text-anchor="middle" {FONT} font-size="20" fill="{}" opacity="{opacity}">{}</text>"#, t.fg, esc(&name)));
         }
     }
