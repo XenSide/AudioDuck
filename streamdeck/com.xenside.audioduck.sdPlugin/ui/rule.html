@@ -112,6 +112,9 @@
 	const saveSettings = () => send('setSettings', settings);
 
 	function setRule(id) {
+		// The rule this key leaves would keep ducking with no key to show it or turn it off: turn it off.
+		const left = ruleOf();
+		if (left && left.id !== id && left.enabled) { left.enabled = false; save(); }
 		settings.rule = id;
 		saveSettings();
 		renderConfig();
@@ -120,7 +123,7 @@
 	function summary(r) {
 		const listed = r.targets.map(pretty).join(', ');
 		const targets = r.all_others ? (listed ? 'all except ' + listed : 'all others') : listed;
-		return r.sources.map(pretty).join(', ') + ' → ' + targets + ' (' + Math.round(r.level * 100) + '%)';
+		return (r.enabled ? 'On: ' : 'Off: ') + r.sources.map(pretty).join(', ') + ' → ' + targets + ' (' + Math.round(r.level * 100) + '%)';
 	}
 
 	function renderConfig() {
