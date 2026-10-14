@@ -18,7 +18,7 @@ One action, "Ducking": **each key is set up on its own**, and two identical keys
 A key's own Stream Deck settings are what it does (`sources`, `targets`, `all_others`, `level`, `enabled`, style), so
 deleting the key deletes its setup. Keys on other pages and profiles are read from Stream Deck's saved profiles, re-read
 when Windows reports Stream Deck saving one (Elgato Stream Deck only; elsewhere only on-screen keys duck).
-`%APPDATA%\AudioDuck\config.json` holds only the threshold and timings shared by all keys.
+`%APPDATA%\AudioDuck\plugin.json` holds the threshold and timings shared by all keys (`config.json` is the desktop app's, rules and all).
 
 Install: `powershell -File streamdeck/install.ps1` (builds, copies the plugin into Stream Deck, restarts it).
 For OpenDeck, copy `com.xenside.audioduck.sdPlugin` (with `bin/audioduck.exe`) into its plugins folder.
