@@ -21,10 +21,6 @@
 <body>
 	<div class="sdpi-wrapper">
 		<div class="sdpi-item">
-			<div class="sdpi-item-label">Rule</div>
-			<select class="sdpi-item-value select" id="pick"></select>
-		</div>
-		<div class="sdpi-item">
 			<div class="sdpi-item-label empty"></div>
 			<div class="sdpi-item-value note" id="status">…</div>
 		</div>
@@ -117,12 +113,6 @@
 		renderConfig();
 	}
 
-	function summary(r) {
-		const listed = r.targets.map(pretty).join(', ');
-		const targets = r.all_others ? (listed ? 'all except ' + listed : 'all others') : listed;
-		return (r.enabled ? 'On: ' : 'Off: ') + r.sources.map(pretty).join(', ') + ' → ' + targets + ' (' + Math.round(r.level * 100) + '%)';
-	}
-
 	function renderConfig() {
 		if (!config) return;
 		const s = config.settings;
@@ -131,8 +121,6 @@
 		for (const k of ['attack_ms', 'hold_ms', 'release_ms']) if (document.activeElement !== $(k)) $(k).value = s[k];
 
 		const current = ruleOf();
-		$('pick').replaceChildren(new Option('+ New rule', 'new'), ...config.rules.map((r) => new Option(summary(r), r.id)));
-		$('pick').value = current ? current.id : 'new';
 		if (draftFor !== (current ? current.id : 0)) openEditor(current);
 		renderStatus();
 	}
@@ -226,8 +214,6 @@
 			}
 			renderEditor();
 		};
-		const del = el('button', { className: 'sdpi-item-value', textContent: 'Delete rule' });
-		del.onclick = () => { config.rules = config.rules.filter((r) => r.id !== ed.id); save(); setRule(0); };
 		const levelValue = el('div', { className: 'sdpi-item-value' }, level, pct);
 		$('editor').replaceChildren(
 			row('When', list(ed.sources), 'checkbox'),
@@ -237,7 +223,6 @@
 			row('Volume', levelValue, 'range'),
 			ed.error ? row('', el('div', { className: 'sdpi-item-value error', textContent: ed.error })) : '',
 			row('', ok),
-			ed.id ? row('', del) : '',
 			ed.saved ? row('', el('div', { className: 'sdpi-item-value note', textContent: 'Saved.' })) : '');
 	}
 
@@ -253,7 +238,6 @@
 	}
 	for (const id of ['style', 'duoPreset', 'duoBg', 'duoAccent']) $(id).addEventListener('change', () => { settings[id] = $(id).value; styleToUi(); saveSettings(); });
 
-	$('pick').onchange = () => setRule($('pick').value === 'new' ? 0 : Number($('pick').value));
 	$('threshold').oninput = () => { config.settings.threshold = $('threshold').value / 100; $('thresholdPct').textContent = $('threshold').value + '%'; };
 	$('threshold').onchange = save;
 	for (const k of ['attack_ms', 'hold_ms', 'release_ms']) {
