@@ -1,5 +1,5 @@
 //! Key images in Foreground Boost's design: flat themed tile ("default" Stream Deck look or "duotone" Duotone Essentials
-//! colours), the trigger app's icon on top, and a pill at the bottom with the ducked volume. Drawn as SVG data URIs.
+//! colours), the trigger app's icon > the lowered app's icon on top, and a pill at the bottom with the ducked volume. Drawn as SVG data URIs.
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -181,7 +181,7 @@ impl Icons {
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum State {
-    SetUp, // no rule on this key yet
+    SetUp, // nothing set up on this key yet
     Off,
     Listening,
     Ducking,
@@ -193,27 +193,38 @@ fn esc(s: &str) -> String {
 
 const FONT: &str = r#"font-family="Segoe UI,Arial,sans-serif" font-weight="700""#;
 
-/// `app`: the rule's (first) trigger app, `level`: its ducked volume (0..1).
-pub fn key_image(icons: &mut Icons, settings: &Value, state: State, app: &str, level: f32) -> String {
+/// One app at `x` (48 px wide): its icon, or its name while it hasn't been seen running.
+fn app_slot(p: &mut Vec<String>, icons: &mut Icons, t: &Theme, app: &str, x: u32, opacity: &str) {
+    match icons.png_b64(app, t) {
+        Some(png) => p.push(format!(r#"<image x="{x}" y="22" width="48" height="48" opacity="{opacity}" href="data:image/png;base64,{png}"/>"#)),
+        None => {
+            let mut chars = app.trim_end_matches(".exe").chars().take(6);
+            let name: String = chars.next().into_iter().flat_map(char::to_uppercase).chain(chars).collect();
+            p.push(format!(r#"<text x="{}" y="52" text-anchor="middle" {FONT} font-size="15" fill="{}" opacity="{opacity}">{}</text>"#, x + 24, t.fg, esc(&name)));
+        }
+    }
+}
+
+/// `trigger`: the (first) app that triggers ducking; `target`: the (first) app it lowers, None for "all other apps";
+/// `level`: the ducked volume (0..1).
+pub fn key_image(icons: &mut Icons, settings: &Value, state: State, trigger: &str, target: Option<&str>, level: f32) -> String {
     let t = theme(settings);
     let lit = matches!(state, State::Listening | State::Ducking);
     let opacity = if lit { "1" } else { "0.45" };
     let mut p = vec![r#"<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144">"#.to_string()];
     p.push(format!(r#"<rect width="144" height="144" fill="{}"/>"#, t.bg));
-    match (state, icons.png_b64(app, &t)) {
-        (State::SetUp, _) => {
-            // AudioDuck's equalizer glyph.
-            let bar = if t.duo { &t.sec } else { &t.fg };
-            for (x, h) in [(46.0, 22.0), (66.0, 40.0), (86.0, 30.0)] {
-                p.push(format!(r#"<rect x="{x}" y="{}" width="12" height="{h}" rx="6" fill="{bar}" opacity="0.45"/>"#, 46.0 - h / 2.0));
-            }
+    if state == State::SetUp {
+        // AudioDuck's equalizer glyph.
+        let bar = if t.duo { &t.sec } else { &t.fg };
+        for (x, h) in [(46.0, 22.0), (66.0, 40.0), (86.0, 30.0)] {
+            p.push(format!(r#"<rect x="{x}" y="{}" width="12" height="{h}" rx="6" fill="{bar}" opacity="0.45"/>"#, 46.0 - h / 2.0));
         }
-        (_, Some(png)) => p.push(format!(r#"<image x="40" y="14" width="64" height="64" opacity="{opacity}" href="data:image/png;base64,{png}"/>"#)),
-        (_, None) => {
-            // App not seen running yet: its name instead of the icon.
-            let mut chars = app.trim_end_matches(".exe").chars().take(9);
-            let name: String = chars.next().into_iter().flat_map(char::to_uppercase).chain(chars).collect();
-            p.push(format!(r#"<text x="72" y="54" text-anchor="middle" {FONT} font-size="20" fill="{}" opacity="{opacity}">{}</text>"#, t.fg, esc(&name)));
+    } else {
+        app_slot(&mut p, icons, &t, trigger, 12, opacity);
+        p.push(format!(r#"<path d="M68 38l8 8-8 8" fill="none" stroke="{}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" opacity="{opacity}"/>"#, t.sec));
+        match target {
+            Some(app) => app_slot(&mut p, icons, &t, app, 84, opacity),
+            None => p.push(format!(r#"<text x="108" y="54" text-anchor="middle" {FONT} font-size="20" fill="{}" opacity="{opacity}">All</text>"#, t.fg)),
         }
     }
     // Fixed-width pill like Foreground Boost: Stream Deck draws Segoe UI wider than browsers, so never size to the text.
@@ -252,6 +263,23 @@ mod tests {
         let t = theme(&json!({ "style": "duotone", "duoPreset": "custom", "duoBg": "#000000", "duoAccent": "#ffffff" }));
         assert_eq!(t.sec, "#666666");
         assert_eq!(theme(&json!({ "style": "duotone", "duoPreset": "custom", "duoBg": "bad" })).bg, "#3b4c66"); // falls back to blue
+    }
+
+    #[test]
+    fn key_shows_trigger_then_target() {
+        let svg = |target| {
+            let url = key_image(&mut Icons::default(), &json!({}), State::Listening, "nosuchapp1.exe", target, 0.2);
+            let b64 = url.trim_start_matches("data:image/svg+xml;base64,");
+            let t: Vec<u8> = b64.bytes().filter(|&c| c != b'=').map(|c| b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".iter().position(|&x| x == c).unwrap() as u8).collect();
+            let bytes: Vec<u8> = t.chunks(4).flat_map(|c| {
+                let n = c.iter().enumerate().fold(0u32, |n, (i, &v)| n | (v as u32) << (18 - 6 * i));
+                [(n >> 16) as u8, (n >> 8) as u8, n as u8].into_iter().take(c.len() - 1)
+            }).collect();
+            String::from_utf8(bytes).unwrap()
+        };
+        let one = svg(Some("nosuchapp2.exe"));
+        assert!(one.find(">Nosuch<").unwrap() < one.find("M68 38").unwrap() && one.matches(">Nosuch<").count() == 2, "{one}");
+        assert!(svg(None).contains(">All<"));
     }
 
     #[test]
