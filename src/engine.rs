@@ -73,7 +73,9 @@ impl Ducker {
             }
             for (app, want) in desired.iter_mut() {
                 let listed = r.targets.iter().any(|x| x == app);
-                let hit = if r.all_others { !listed && !r.sources.iter().any(|x| x == app) } else { listed };
+                // VolumeProxy's foreground.exe mirrors the focused app, which is ducked (or is a source) on its own:
+                // ducking the mirror too would duck a source like Firefox by its own audio.
+                let hit = if r.all_others { !listed && *app != "foreground.exe" && !r.sources.iter().any(|x| x == app) } else { listed };
                 if hit {
                     *want = want.min(r.level);
                 }
@@ -135,6 +137,14 @@ mod tests {
         let mut d = Ducker::default();
         let g = d.step(&rules, &s, &peaks(&[("discord.exe", 1.0), ("spotify.exe", 0.1), ("firefox.exe", 0.1), ("foreground.exe", 0.0)]), 10.0);
         assert_eq!((g["discord.exe"], g["spotify.exe"], g["firefox.exe"], g["foreground.exe"]), (1.0, 0.1, 0.5, 1.0));
+    }
+
+    #[test]
+    fn all_others_leaves_volumeproxy_alone() {
+        let rules = [Rule { sources: vec!["firefox.exe".into()], all_others: true, ..Default::default() }];
+        let s = Settings { attack_ms: 0, ..Default::default() };
+        let g = Ducker::default().step(&rules, &s, &peaks(&[("firefox.exe", 1.0), ("foreground.exe", 1.0), ("spotify.exe", 0.1)]), 10.0).clone();
+        assert_eq!((g["firefox.exe"], g["foreground.exe"], g["spotify.exe"]), (1.0, 1.0, 0.2));
     }
 
     #[test]
