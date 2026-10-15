@@ -1,5 +1,5 @@
 //! Key images in Foreground Boost's design: flat themed tile ("default" Stream Deck look or "duotone" Duotone Essentials
-//! colours), the trigger app's icon > the lowered app's icon on top, and a pill at the bottom with the ducked volume. Drawn as SVG data URIs.
+//! colours), the trigger app's icon > the lowered app's icon on top, and a pill at the bottom with the ducked volume. Drawn as SVG, sent as PNG data URIs.
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -208,6 +208,30 @@ fn app_slot(p: &mut Vec<String>, icons: &mut Icons, t: &Theme, app: &str, x: u32
 /// `trigger`: the (first) app that triggers ducking; `target`: the (first) app it lowers, None for "all other apps";
 /// `level`: the ducked volume (0..1).
 pub fn key_image(icons: &mut Icons, settings: &Value, state: State, trigger: &str, target: Option<&str>, level: f32) -> String {
+    let svg = key_svg(icons, settings, state, trigger, target, level);
+    match to_png(&svg) {
+        Some(png) => format!("data:image/png;base64,{}", base64(&png)),
+        None => format!("data:image/svg+xml;base64,{}", base64(svg.as_bytes())),
+    }
+}
+
+/// Stream Deck rasterizing an SVG with an embedded icon held back key events from a phone deck by up to 0.6 s;
+/// a ready PNG costs it almost nothing.
+fn to_png(svg: &str) -> Option<Vec<u8>> {
+    static OPT: std::sync::OnceLock<resvg::usvg::Options> = std::sync::OnceLock::new();
+    let opt = OPT.get_or_init(|| {
+        let mut o = resvg::usvg::Options::default();
+        if let Ok(f) = std::fs::read(r"C:\Windows\Fonts\segoeuib.ttf") { o.fontdb_mut().load_font_data(f) } // the only face the keys use
+        o.fontdb_mut().set_sans_serif_family("Segoe UI");
+        o
+    });
+    let tree = resvg::usvg::Tree::from_str(svg, opt).ok()?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(144, 144)?;
+    resvg::render(&tree, resvg::tiny_skia::Transform::default(), &mut pixmap.as_mut());
+    pixmap.encode_png().ok()
+}
+
+fn key_svg(icons: &mut Icons, settings: &Value, state: State, trigger: &str, target: Option<&str>, level: f32) -> String {
     let t = theme(settings);
     let lit = matches!(state, State::Listening | State::Ducking);
     let opacity = if lit { "1" } else { "0.45" };
@@ -247,7 +271,7 @@ pub fn key_image(icons: &mut Icons, settings: &Value, state: State, trigger: &st
     let x = if matches!(state, State::SetUp | State::Off) { 72 } else { 84 };
     p.push(format!(r#"<text x="{x}" y="121" text-anchor="middle" {FONT} font-size="22" fill="{ink}">{label}</text>"#));
     p.push("</svg>".into());
-    format!("data:image/svg+xml;base64,{}", base64(p.concat().as_bytes()))
+    p.concat()
 }
 
 #[cfg(test)]
@@ -267,19 +291,12 @@ mod tests {
 
     #[test]
     fn key_shows_trigger_then_target() {
-        let svg = |target| {
-            let url = key_image(&mut Icons::default(), &json!({}), State::Listening, "nosuchapp1.exe", target, 0.2);
-            let b64 = url.trim_start_matches("data:image/svg+xml;base64,");
-            let t: Vec<u8> = b64.bytes().filter(|&c| c != b'=').map(|c| b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".iter().position(|&x| x == c).unwrap() as u8).collect();
-            let bytes: Vec<u8> = t.chunks(4).flat_map(|c| {
-                let n = c.iter().enumerate().fold(0u32, |n, (i, &v)| n | (v as u32) << (18 - 6 * i));
-                [(n >> 16) as u8, (n >> 8) as u8, n as u8].into_iter().take(c.len() - 1)
-            }).collect();
-            String::from_utf8(bytes).unwrap()
-        };
+        let svg = |target| key_svg(&mut Icons::default(), &json!({}), State::Listening, "nosuchapp1.exe", target, 0.2);
         let one = svg(Some("nosuchapp2.exe"));
         assert!(one.find(">Nosuch<").unwrap() < one.find("M68 38").unwrap() && one.matches(">Nosuch<").count() == 2, "{one}");
         assert!(svg(None).contains(">All<"));
+        let url = key_image(&mut Icons::default(), &json!({}), State::Listening, "nosuchapp1.exe", None, 0.2);
+        assert!(url.starts_with("data:image/png;base64,"), "{url:.40}");
     }
 
     #[test]
