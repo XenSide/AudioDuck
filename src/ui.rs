@@ -288,7 +288,13 @@ impl App {
             let bar_width = (ui.available_width() - 260.0).max(80.0);
             egui::Grid::new("apps").num_columns(3).spacing(vec2(14.0, 10.0)).min_col_width(120.0).show(ui, |ui| {
                 for (app, peak) in &live.peaks {
-                    ui.label(pretty(app));
+                    // long process names would push the whole window wider than it is
+                    let name = pretty(app);
+                    if name.chars().count() > 18 {
+                        ui.label(format!("{}…", name.chars().take(17).collect::<String>())).on_hover_text(name);
+                    } else {
+                        ui.label(name);
+                    }
                     let loud = *peak > config.settings.threshold; // orange = loud enough to trigger a rule
                     ui.add(ProgressBar::new(*peak).desired_width(bar_width).desired_height(8.0).corner_radius(4).fill(if loud { DUCKING } else { ACCENT }));
                     let g = if config.enabled { live.gains.get(app).copied().unwrap_or(1.0) } else { 1.0 };
