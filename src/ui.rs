@@ -1,80 +1,15 @@
 //! The settings window. Reads/writes `Shared`; never touches audio directly.
-use std::sync::Arc;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::time::Duration;
 
-use eframe::egui::{
-    self, Align, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Frame, Id, Layout, Margin, Modal, ProgressBar, RichText,
-    ScrollArea, Sense, Slider, Stroke, Ui, ViewportCommand, vec2,
-};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel};
 
 use crate::engine::Rule;
-use crate::{Config, Live, SharedRef, save_config};
+use crate::{Config, SharedRef, save_config};
 
-const BG: Color32 = Color32::from_rgb(21, 22, 27);
-const CARD: Color32 = Color32::from_rgb(30, 32, 39);
-const ROW: Color32 = Color32::from_rgb(37, 40, 50);
-const BORDER: Color32 = Color32::from_rgb(42, 45, 54);
-const INPUT: Color32 = Color32::from_rgb(42, 45, 54);
-const HOVER: Color32 = Color32::from_rgb(52, 56, 68);
-const TEXT: Color32 = Color32::from_rgb(230, 232, 238);
-const MUTED: Color32 = Color32::from_rgb(139, 144, 160);
-const ACCENT: Color32 = Color32::from_rgb(crate::ACCENT[0], crate::ACCENT[1], crate::ACCENT[2]);
-const DUCKING: Color32 = Color32::from_rgb(crate::DUCKING[0], crate::DUCKING[1], crate::DUCKING[2]);
-
-fn semibold() -> FontFamily {
-    FontFamily::Name("semibold".into())
-}
-
-fn setup_style(ctx: &egui::Context) {
-    let mut fonts = FontDefinitions::default();
-    // Segoe UI ships with Windows; fall back to egui's bundled fonts if it isn't there.
-    for (name, file) in [("segoe", "segoeui.ttf"), ("segoe-sb", "seguisb.ttf")] {
-        if let Ok(bytes) = std::fs::read(format!(r"C:\Windows\Fonts\{file}")) {
-            fonts.font_data.insert(name.into(), Arc::new(FontData::from_owned(bytes)));
-        }
-    }
-    let base = fonts.families[&FontFamily::Proportional].clone();
-    if fonts.font_data.contains_key("segoe") {
-        fonts.families.get_mut(&FontFamily::Proportional).unwrap().insert(0, "segoe".into());
-    }
-    let mut sb = base;
-    if fonts.font_data.contains_key("segoe-sb") {
-        sb.insert(0, "segoe-sb".into());
-    }
-    fonts.families.insert(semibold(), sb);
-    ctx.set_fonts(fonts);
-
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = BG;
-    v.window_fill = CARD;
-    v.window_stroke = Stroke::new(1.0, BORDER);
-    v.window_corner_radius = CornerRadius::same(12);
-    v.extreme_bg_color = INPUT;
-    v.selection.bg_fill = ACCENT;
-    v.selection.stroke = Stroke::new(1.0, BG);
-    v.override_text_color = Some(TEXT);
-    for (w, fill) in [(&mut v.widgets.inactive, INPUT), (&mut v.widgets.hovered, HOVER), (&mut v.widgets.active, HOVER)] {
-        w.weak_bg_fill = fill;
-        w.bg_fill = fill;
-        w.corner_radius = CornerRadius::same(7);
-        w.bg_stroke = Stroke::new(1.0, Color32::from_rgb(64, 68, 82)); // also makes checkboxes visible on cards
-    }
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
-    v.slider_trailing_fill = true;
-    ctx.set_visuals_of(egui::Theme::Dark, v);
-    ctx.set_theme(egui::Theme::Dark);
-    ctx.all_styles_mut(|s| {
-        s.spacing.item_spacing = vec2(8.0, 8.0);
-        s.spacing.button_padding = vec2(12.0, 6.0);
-        s.spacing.interact_size.y = 26.0;
-        for f in s.text_styles.values_mut() {
-            f.size += 1.5;
-        }
-    });
-}
+slint::include_modules!();
 
 fn pretty(app: &str) -> String {
     let s = app.strip_suffix(".exe").unwrap_or(app);
@@ -82,33 +17,35 @@ fn pretty(app: &str) -> String {
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
-fn toggle(ui: &mut Ui, on: &mut bool) {
-    let (rect, mut resp) = ui.allocate_exact_size(vec2(46.0, 26.0), Sense::click());
-    if resp.clicked() {
-        *on = !*on;
-        resp.mark_changed();
+fn rule_row(rule: &Rule) -> RuleRow {
+    let sources = rule.sources.iter().map(|a| pretty(a)).collect::<Vec<_>>().join(", ");
+    let listed = rule.targets.iter().map(|a| pretty(a)).collect::<Vec<_>>().join(", ");
+    let targets = match (rule.all_others, rule.targets.is_empty()) {
+        (true, true) => "all other apps".into(),
+        (true, false) => format!("all other apps except {listed}"),
+        _ => listed,
+    };
+    RuleRow { enabled: rule.enabled, sources: sources.into(), targets: targets.into(), level: format!("{}%", (rule.level * 100.0).round()).into() }
+}
+
+fn push_config(w: &MainWindow, c: &Config) {
+    w.set_enabled(c.enabled);
+    w.set_rules(ModelRc::new(VecModel::from(c.rules.iter().map(rule_row).collect::<Vec<_>>())));
+    w.set_threshold((c.settings.threshold * 100.0).round());
+    w.set_fade_down(c.settings.attack_ms as i32);
+    w.set_hold(c.settings.hold_ms as i32);
+    w.set_fade_up(c.settings.release_ms as i32);
+}
+
+/// Brings the window up from the tray. Call on the UI thread.
+pub fn bring_up(w: &MainWindow) {
+    let _ = w.show();
+    w.window().set_minimized(false);
+    if let Ok(h) = w.window().window_handle().window_handle()
+        && let RawWindowHandle::Win32(h) = h.as_raw()
+    {
+        crate::show_window(h.hwnd.get());
     }
-    let t = ui.ctx().animate_bool_responsive(resp.id, *on);
-    let p = ui.painter();
-    p.rect_filled(rect, 13.0, if *on { ACCENT } else { Color32::from_rgb(58, 62, 74) });
-    p.circle_filled(egui::pos2(egui::lerp(rect.left() + 13.0..=rect.right() - 13.0, t), rect.center().y), 9.0, Color32::WHITE);
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-}
-
-fn card(ui: &mut Ui, title: &str, header_right: impl FnOnce(&mut Ui), body: impl FnOnce(&mut Ui)) {
-    Frame::new().fill(CARD).stroke(Stroke::new(1.0, BORDER)).corner_radius(12).inner_margin(Margin::same(16)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(title).size(16.0).family(semibold()));
-            ui.with_layout(Layout::right_to_left(Align::Center), header_right);
-        });
-        ui.add_space(4.0);
-        body(ui);
-    });
-}
-
-fn primary_button(ui: &mut Ui, text: &str) -> bool {
-    ui.add(egui::Button::new(RichText::new(text).color(BG).family(semibold())).fill(ACCENT)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
 struct Editor {
@@ -116,23 +53,33 @@ struct Editor {
     enabled: bool,
     sources: Vec<(String, bool)>,
     targets: Vec<(String, bool)>,
-    all_others: bool,
-    level: f32,
-    manual: String,
-    error: &'static str,
 }
 
 impl Editor {
-    fn new(index: Option<usize>, rule: &Rule, live_apps: impl Iterator<Item = String>) -> Self {
+    fn open(w: &MainWindow, index: Option<usize>, rule: &Rule, live_apps: impl Iterator<Item = String>) -> Self {
         let mut apps: Vec<String> = live_apps.chain(rule.sources.iter().cloned()).chain(rule.targets.iter().cloned()).collect();
         apps.sort();
         apps.dedup();
         let pick = |chosen: &[String]| apps.iter().map(|a| (a.clone(), chosen.contains(a))).collect();
-        Self { index, enabled: rule.enabled, sources: pick(&rule.sources), targets: pick(&rule.targets), all_others: rule.all_others, level: rule.level, manual: String::new(), error: "" }
+        let ed = Self { index, enabled: rule.enabled, sources: pick(&rule.sources), targets: pick(&rule.targets) };
+        ed.push_lists(w);
+        w.set_editor_title(if index.is_some() { "Edit rule" } else { "New rule" }.into());
+        w.set_all_others(rule.all_others);
+        w.set_level((rule.level * 100.0).round());
+        w.set_manual("".into());
+        w.set_editor_error("".into());
+        w.set_editor_open(true);
+        ed
     }
 
-    fn add_manual(&mut self) {
-        let mut app = self.manual.trim().to_lowercase();
+    fn push_lists(&self, w: &MainWindow) {
+        let picks = |list: &[(String, bool)]| ModelRc::new(VecModel::from(list.iter().map(|(a, c)| Pick { name: a.into(), checked: *c }).collect::<Vec<_>>()));
+        w.set_sources(picks(&self.sources));
+        w.set_targets(picks(&self.targets));
+    }
+
+    fn add_manual(&mut self, w: &MainWindow) {
+        let mut app = w.get_manual().trim().to_lowercase();
         if app.is_empty() {
             return;
         }
@@ -144,256 +91,170 @@ impl Editor {
                 list.push((app.clone(), false));
             }
         }
-        self.manual.clear();
+        w.set_manual("".into());
+        self.push_lists(w);
     }
 
     fn checked(list: &[(String, bool)]) -> Vec<String> {
         list.iter().filter(|(_, c)| *c).map(|(a, _)| a.clone()).collect()
     }
 
-    /// Returns Some(rule) when the user confirms a valid rule, Some(None)-like via `done` for cancel.
-    fn show(&mut self, ctx: &egui::Context) -> (bool, Option<Rule>) {
-        let mut result = (false, None);
-        let modal = Modal::new(Id::new("rule-editor"))
-            .frame(Frame::new().fill(CARD).stroke(Stroke::new(1.0, BORDER)).corner_radius(12).inner_margin(Margin::same(18)))
-            .show(ctx, |ui| {
-                ui.set_width(540.0);
-                ui.label(RichText::new(if self.index.is_some() { "Edit rule" } else { "New rule" }).size(18.0).family(semibold()));
-                ui.add_space(4.0);
-                ui.columns(2, |cols| {
-                    let all_others = self.all_others;
-                    let right = if all_others { "…except these" } else { "…lower" }; // with all_others the list is exclusions
-                    for (ui, (title, list)) in cols.iter_mut().zip([("When this plays…", &mut self.sources), (right, &mut self.targets)]) {
-                        ui.label(RichText::new(title).family(semibold()));
-                        Frame::new().fill(BG).corner_radius(8).inner_margin(Margin::same(8)).show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ScrollArea::vertical().id_salt(list as *const _ as usize).max_height(200.0).min_scrolled_height(200.0).show(ui, |ui| {
-                                for (app, on) in list.iter_mut() {
-                                    ui.checkbox(on, app.as_str());
-                                }
-                            });
-                        });
-                    }
-                    cols[1].checkbox(&mut self.all_others, "Lower all other apps");
-                });
-                ui.horizontal(|ui| {
-                    let edit = ui.add(egui::TextEdit::singleline(&mut self.manual).hint_text("App not playing yet, e.g. spotify.exe").desired_width(ui.available_width() - 100.0));
-                    if ui.button("Add").clicked() || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
-                        self.add_manual();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Volume while ducking");
-                    let mut pct = (self.level * 100.0).round() as i32;
-                    ui.spacing_mut().slider_width = ui.available_width() - 70.0;
-                    if ui.add(Slider::new(&mut pct, 0..=100).suffix("%")).changed() {
-                        self.level = pct as f32 / 100.0;
-                    }
-                });
-                if !self.error.is_empty() {
-                    ui.label(RichText::new(self.error).color(DUCKING));
-                }
-                ui.add_space(4.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if primary_button(ui, "Save") {
-                        let (sources, targets) = (Self::checked(&self.sources), Self::checked(&self.targets));
-                        if sources.is_empty() {
-                            self.error = "Pick at least one app that triggers ducking.";
-                        } else if !self.all_others && targets.is_empty() {
-                            self.error = "Pick at least one app to lower.";
-                        } else {
-                            result = (true, Some(Rule { sources, targets, all_others: self.all_others, level: self.level, enabled: self.enabled }));
-                        }
-                    }
-                    if ui.button("Cancel").clicked() {
-                        result = (true, None);
-                    }
-                });
-            });
-        if modal.should_close() {
-            result.0 = true;
+    /// The rule to save, or the reason it can't be saved yet.
+    fn rule(&self, w: &MainWindow) -> Result<Rule, &'static str> {
+        let (sources, targets, all_others) = (Self::checked(&self.sources), Self::checked(&self.targets), w.get_all_others());
+        if sources.is_empty() {
+            Err("Pick at least one app that triggers ducking.")
+        } else if !all_others && targets.is_empty() {
+            Err("Pick at least one app to lower.")
+        } else {
+            Ok(Rule { sources, targets, all_others, level: w.get_level() / 100.0, enabled: self.enabled })
         }
-        result
     }
 }
 
-pub struct App {
-    shared: SharedRef,
-    editor: Option<Editor>,
-    start_hidden: bool,
-}
+type Change = dyn Fn(&dyn Fn(&mut Config));
 
-impl App {
-    pub fn new(cc: &eframe::CreationContext, shared: SharedRef, start_hidden: bool) -> Self {
-        setup_style(&cc.egui_ctx);
-        if let Ok(h) = cc.window_handle()
-            && let RawWindowHandle::Win32(w) = h.as_raw()
-        {
-            shared.lock().unwrap().hwnd = w.hwnd.get();
-        }
-        Self { shared, editor: None, start_hidden }
-    }
+/// Builds the window, starts the engine via `spawn_engine`, and runs until Quit in the tray.
+pub fn run(shared: SharedRef, start_hidden: bool, spawn_engine: impl FnOnce(slint::Weak<MainWindow>)) -> Result<(), slint::PlatformError> {
+    let w = MainWindow::new()?;
+    let icon = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&crate::icon_rgba(crate::ACCENT, 64), 64, 64);
+    w.set_app_icon(Image::from_rgba8(icon));
+    let pushed = Rc::new(Cell::new(u64::MAX)); // config rev the window last showed
+    let editor: Rc<RefCell<Option<Editor>>> = Rc::default();
 
-    fn rules(&mut self, ui: &mut Ui, config: &mut Config, live: &Live) {
-        let mut new_rule = false;
-        card(ui, "Rules", |ui| new_rule = primary_button(ui, "+ New rule"), |ui| {
-            if config.rules.is_empty() {
-                ui.label(RichText::new("No rules yet. Example: when Discord plays, lower Spotify to 20%.").color(MUTED));
-            }
-            let mut delete = None;
-            for (i, rule) in config.rules.iter_mut().enumerate() {
-                Frame::new().fill(ROW).corner_radius(8).inner_margin(Margin { left: 10, right: 6, top: 6, bottom: 6 }).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut rule.enabled, "").on_hover_text("Turn rule on or off");
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button("×").on_hover_text("Delete").clicked() {
-                                delete = Some(i);
-                            }
-                            if ui.button("Edit").clicked() {
-                                self.editor = Some(Editor::new(Some(i), rule, live.peaks.iter().map(|(a, _)| a.clone())));
-                            }
-                            ui.label(RichText::new(format!("{}%", (rule.level * 100.0).round())).color(MUTED));
-                            ui.with_layout(Layout::left_to_right(Align::Center).with_main_wrap(true), |ui| {
-                                let sources = rule.sources.iter().map(|a| pretty(a)).collect::<Vec<_>>().join(", ");
-                                let listed = rule.targets.iter().map(|a| pretty(a)).collect::<Vec<_>>().join(", ");
-                                let targets = match (rule.all_others, rule.targets.is_empty()) {
-                                    (true, true) => "all other apps".into(),
-                                    (true, false) => format!("all other apps except {listed}"),
-                                    _ => listed,
-                                };
-                                ui.label(RichText::new(sources).family(semibold()));
-                                ui.label(RichText::new("→").color(MUTED));
-                                ui.label(targets);
-                            });
-                        });
-                    });
-                });
-            }
-            if let Some(i) = delete {
-                config.rules.remove(i);
-            }
-        });
-        if new_rule {
-            self.editor = Some(Editor::new(None, &Rule::default(), live.peaks.iter().map(|(a, _)| a.clone())));
-        }
-    }
-
-    fn apps(ui: &mut Ui, config: &Config, live: &Live) {
-        card(ui, "Apps playing", |_| {}, |ui| {
-            if live.peaks.is_empty() {
-                ui.label(RichText::new("No app is playing audio.").color(MUTED));
-                return;
-            }
-            let bar_width = (ui.available_width() - 260.0).max(80.0);
-            egui::Grid::new("apps").num_columns(3).spacing(vec2(14.0, 10.0)).min_col_width(120.0).show(ui, |ui| {
-                for (app, peak) in &live.peaks {
-                    // long process names would push the whole window wider than it is
-                    let name = pretty(app);
-                    if name.chars().count() > 18 {
-                        ui.label(format!("{}…", name.chars().take(17).collect::<String>())).on_hover_text(name);
-                    } else {
-                        ui.label(name);
-                    }
-                    let loud = *peak > config.settings.threshold; // orange = loud enough to trigger a rule
-                    ui.add(ProgressBar::new(*peak).desired_width(bar_width).desired_height(8.0).corner_radius(4).fill(if loud { DUCKING } else { ACCENT }));
-                    let g = if config.enabled { live.gains.get(app).copied().unwrap_or(1.0) } else { 1.0 };
-                    let vol = live.volumes.get(app).map(|v| format!("vol {}%", (v * g * 100.0).round())).unwrap_or_default();
-                    ui.label(RichText::new(if g < 0.999 { format!("↓ {vol}") } else { vol }).color(if g < 0.999 { DUCKING } else { MUTED }));
-                    ui.end_row();
-                }
-            });
-        });
-    }
-
-    fn settings(ui: &mut Ui, config: &mut Config) {
-        card(ui, "Settings", |_| {}, |ui| {
-            let s = &mut config.settings;
-            egui::Grid::new("settings").num_columns(2).spacing(vec2(16.0, 10.0)).show(ui, |ui| {
-                ui.label("Threshold").on_hover_text("Bars turn orange above the threshold");
-                let mut pct = (s.threshold * 100.0).round() as i32;
-                ui.spacing_mut().slider_width = (ui.available_width() - 60.0).max(120.0);
-                if ui.add(Slider::new(&mut pct, 1..=30).suffix("%")).changed() {
-                    s.threshold = pct as f32 / 100.0;
-                }
-                ui.end_row();
-                for (label, v) in [("Fade down", &mut s.attack_ms), ("Hold", &mut s.hold_ms), ("Fade up", &mut s.release_ms)] {
-                    ui.label(label);
-                    ui.add(egui::DragValue::new(v).range(0..=5000).speed(10).suffix(" ms"));
-                    ui.end_row();
-                }
-            });
-        });
-    }
-}
-
-impl eframe::App for App {
-    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
-        BG.to_normalized_gamma_f32()
-    }
-
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        let shared = self.shared.clone();
-        let mut sh = shared.lock().unwrap();
-        // eframe shows the window after its first frame even if built invisible, so `--tray` hides it on the next one.
-        let hide_now = self.start_hidden && ctx.cumulative_frame_nr() >= 1;
-        if self.start_hidden && !hide_now {
-            ctx.request_repaint();
-        }
-        if hide_now {
-            self.start_hidden = false;
-        }
-        if hide_now || ctx.input(|i| i.viewport().close_requested()) {
-            // Closing the window keeps AudioDuck running in the tray; quit from the tray menu.
-            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            unsafe {
-                let _ = ShowWindow(HWND(sh.hwnd as _), SW_HIDE);
-            }
-        }
-        // Hidden in the tray or minimized: don't keep repainting; showing/restoring triggers a paint.
-        if crate::window_shown(sh.hwnd) {
-            ctx.request_repaint_after(Duration::from_millis(50));
-        }
-
-        let before = sh.config.clone();
-        let crate::Shared { config, live, .. } = &mut *sh;
-        Frame::new().fill(BG).show(ui, |ui| {
-            ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                Frame::new().inner_margin(Margin { left: 20, right: 20, top: 16, bottom: 20 }).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 12.0;
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.label(RichText::new("AudioDuck").size(24.0).family(semibold()));
-                            let status = if !config.enabled { "Paused" } else if live.ducking { "Lowering the volume…" } else { "Listening" };
-                            ui.label(RichText::new(status).color(if live.ducking && config.enabled { DUCKING } else { MUTED }));
-                        });
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| toggle(ui, &mut config.enabled));
-                    });
-                    self.rules(ui, config, live);
-                    Self::apps(ui, config, live);
-                    Self::settings(ui, config);
-                });
-            });
-        });
-
-        if let Some(editor) = &mut self.editor {
-            let (done, rule) = editor.show(&ctx);
-            if let Some(rule) = rule {
-                match editor.index {
-                    Some(i) if i < config.rules.len() => config.rules[i] = rule,
-                    _ => config.rules.push(rule),
-                }
-            }
-            if done {
-                self.editor = None;
-            }
-        }
-
-        if sh.config != before {
+    // Every edit goes through here: change the config, persist it, and redraw from it.
+    let change: Rc<Change> = {
+        let (shared, weak, pushed) = (shared.clone(), w.as_weak(), pushed.clone());
+        Rc::new(move |f| {
+            let mut sh = shared.lock().unwrap();
+            f(&mut sh.config);
             sh.rev += 1;
+            pushed.set(sh.rev);
             save_config(&sh.config);
+            if let Some(w) = weak.upgrade() {
+                push_config(&w, &sh.config);
+            }
+        })
+    };
+    let live_apps = {
+        let shared = shared.clone();
+        move || shared.lock().unwrap().live.peaks.iter().map(|(a, _)| a.clone()).collect::<Vec<_>>()
+    };
+
+    let c = change.clone();
+    w.on_enabled_toggled(move |on| c(&|cfg| cfg.enabled = on));
+    let c = change.clone();
+    w.on_rule_toggled(move |i, on| c(&|cfg| if let Some(r) = cfg.rules.get_mut(i as usize) { r.enabled = on }));
+    let c = change.clone();
+    w.on_delete_rule(move |i| c(&|cfg| if (i as usize) < cfg.rules.len() { cfg.rules.remove(i as usize); }));
+    let c = change.clone();
+    let weak = w.as_weak();
+    w.on_settings_changed(move || {
+        let w = weak.unwrap();
+        let (t, d, h, u) = (w.get_threshold(), w.get_fade_down(), w.get_hold(), w.get_fade_up());
+        c(&|cfg| {
+            let s = &mut cfg.settings;
+            s.threshold = t.round() / 100.0;
+            (s.attack_ms, s.hold_ms, s.release_ms) = (d.max(0) as u32, h.max(0) as u32, u.max(0) as u32);
+        })
+    });
+
+    let (weak, ed, apps) = (w.as_weak(), editor.clone(), live_apps.clone());
+    w.on_new_rule(move || {
+        *ed.borrow_mut() = Some(Editor::open(&weak.unwrap(), None, &Rule::default(), apps().into_iter()));
+    });
+    let (weak, ed, sh, apps) = (w.as_weak(), editor.clone(), shared.clone(), live_apps.clone());
+    w.on_edit_rule(move |i| {
+        let rule = sh.lock().unwrap().config.rules.get(i as usize).cloned();
+        if let Some(rule) = rule {
+            *ed.borrow_mut() = Some(Editor::open(&weak.unwrap(), Some(i as usize), &rule, apps().into_iter()));
         }
+    });
+    let ed = editor.clone();
+    w.on_pick(move |target, i, on| {
+        if let Some(e) = ed.borrow_mut().as_mut() {
+            let list = if target { &mut e.targets } else { &mut e.sources };
+            if let Some(p) = list.get_mut(i as usize) {
+                p.1 = on;
+            }
+        }
+    });
+    let (weak, ed) = (w.as_weak(), editor.clone());
+    w.on_add_manual(move || {
+        if let Some(e) = ed.borrow_mut().as_mut() {
+            e.add_manual(&weak.unwrap());
+        }
+    });
+    let (weak, ed, c) = (w.as_weak(), editor.clone(), change.clone());
+    w.on_save(move || {
+        let w = weak.unwrap();
+        let Some(e) = ed.borrow_mut().take() else { return };
+        match e.rule(&w) {
+            Err(msg) => {
+                w.set_editor_error(msg.into());
+                *ed.borrow_mut() = Some(e);
+            }
+            Ok(rule) => {
+                let index = e.index;
+                c(&|cfg| match index {
+                    Some(i) if i < cfg.rules.len() => cfg.rules[i] = rule.clone(),
+                    _ => cfg.rules.push(rule.clone()),
+                });
+                w.set_editor_open(false);
+            }
+        }
+    });
+    let (weak, ed) = (w.as_weak(), editor.clone());
+    w.on_cancel(move || {
+        ed.borrow_mut().take();
+        weak.unwrap().set_editor_open(false);
+    });
+
+    // Live meters and changes from the tray. Slint only repaints what these setters actually change.
+    let apps_model = Rc::new(VecModel::<AppRow>::default());
+    w.set_apps(ModelRc::from(apps_model.clone()));
+    let timer = Timer::default();
+    let (weak, sh) = (w.as_weak(), shared.clone());
+    timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
+        let Some(w) = weak.upgrade() else { return };
+        let shown = w.window().is_visible() && !w.window().is_minimized();
+        let mut sh = sh.lock().unwrap();
+        sh.visible = shown;
+        if !shown {
+            return;
+        }
+        if sh.rev != pushed.get() {
+            pushed.set(sh.rev);
+            push_config(&w, &sh.config);
+        }
+        let (c, live) = (&sh.config, &sh.live);
+        w.set_status(if !c.enabled { "Paused" } else if live.ducking { "Lowering the volume…" } else { "Listening" }.into());
+        w.set_lowering(c.enabled && live.ducking);
+        let rows: Vec<AppRow> = live
+            .peaks
+            .iter()
+            .map(|(app, peak)| {
+                let g = if c.enabled { live.gains.get(app).copied().unwrap_or(1.0) } else { 1.0 };
+                let vol = live.volumes.get(app).map(|v| format!("vol {}%", (v * g * 100.0).round())).unwrap_or_default();
+                let lowered = g < 0.999;
+                AppRow { name: pretty(app).into(), peak: *peak, loud: *peak > c.settings.threshold, vol: if lowered { format!("↓ {vol}") } else { vol }.into(), lowered }
+            })
+            .collect();
+        if rows.len() != apps_model.row_count() {
+            apps_model.set_vec(rows);
+        } else {
+            for (i, row) in rows.into_iter().enumerate() {
+                if apps_model.row_data(i).as_ref() != Some(&row) {
+                    apps_model.set_row_data(i, row);
+                }
+            }
+        }
+    });
+
+    spawn_engine(w.as_weak());
+    if !start_hidden {
+        w.show()?;
     }
+    // Closing the window only hides it (Slint's default); AudioDuck keeps running in the tray until Quit.
+    slint::run_event_loop_until_quit()
 }
