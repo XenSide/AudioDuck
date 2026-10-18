@@ -51,7 +51,7 @@ pub struct Shared {
     pub config: Config,
     pub rev: u64, // bumped on every config change so the engine picks it up
     pub live: Live,
-    pub hwnd: isize,
+    pub visible: bool, // window on screen, set by the UI
 }
 
 pub type SharedRef = Arc<Mutex<Shared>>;
@@ -106,11 +106,6 @@ fn tray_icon(color: [u8; 3]) -> Option<tray_icon::Icon> {
     tray_icon::Icon::from_rgba(icon_rgba(color, 32), 32, 32).ok()
 }
 
-/// On screen: visible and not minimized (Windows counts minimized windows as visible).
-pub fn window_shown(hwnd: isize) -> bool {
-    unsafe { IsWindowVisible(HWND(hwnd as _)).as_bool() && !IsIconic(HWND(hwnd as _)).as_bool() }
-}
-
 pub fn show_window(hwnd: isize) {
     unsafe {
         let h = HWND(hwnd as _);
@@ -121,7 +116,7 @@ pub fn show_window(hwnd: isize) {
 }
 
 /// Audio + tray thread. Owns every COM object; talks to the window only through `Shared`.
-fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
+fn engine_thread(shared: SharedRef, window: slint::Weak<ui::MainWindow>) {
     let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let state = app_dir().join("ducked_state.json");
     if !state.exists() && let Some(s) = read_with_fallback("ducked_state.json") {
@@ -139,11 +134,8 @@ fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
     // tray-icon needs a message loop on its thread: the wait below pumps it.
     let tray = TrayIconBuilder::new().with_menu(Box::new(menu)).with_menu_on_left_click(false).with_tooltip("AudioDuck").build().ok();
 
-    let show = |shared: &SharedRef| {
-        // Copy the handle and release the lock first: ShowWindow waits for the UI thread, which may be waiting for this lock.
-        let hwnd = shared.lock().unwrap().hwnd;
-        show_window(hwnd);
-        ctx.request_repaint();
+    let show = || {
+        let _ = window.upgrade_in_event_loop(|w| ui::bring_up(&w));
     };
     let mut ducker = Ducker::default();
     let mut rev = u64::MAX;
@@ -162,18 +154,17 @@ fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
         }
         while let Ok(e) = TrayIconEvent::receiver().try_recv() {
             if matches!(e, TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }) {
-                show(&shared);
+                show();
             }
         }
         while let Ok(e) = MenuEvent::receiver().try_recv() {
             if e.id == *open.id() {
-                show(&shared);
+                show();
             } else if e.id == *toggle.id() {
                 let mut sh = shared.lock().unwrap();
                 sh.config.enabled = toggle.is_checked();
                 sh.rev += 1;
                 save_config(&sh.config);
-                ctx.request_repaint();
             } else if e.id == *quit.id() {
                 mixer.restore_all();
                 std::process::exit(0);
@@ -183,7 +174,7 @@ fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
         let now = Instant::now();
         let dt = (now - last_tick).as_secs_f64().min(0.2) * 1000.0;
         last_tick = now;
-        let hwnd = {
+        let visible = {
             let sh = shared.lock().unwrap();
             if sh.rev != rev {
                 rev = sh.rev;
@@ -193,9 +184,8 @@ fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
                 }
                 cfg = sh.config.clone();
             }
-            sh.hwnd
+            sh.visible
         };
-        let visible = window_shown(hwnd);
         if visible != was_visible {
             was_visible = visible;
             last_refresh -= REFRESH;
@@ -231,7 +221,7 @@ fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
     }
 }
 
-fn main() -> eframe::Result {
+fn main() -> Result<(), slint::PlatformError> {
     // Two instances would each take the other's ducked volume as the user's and push it down for good.
     let _single = unsafe { CreateMutexW(None, false, w!("AudioDuck.SingleInstance")) };
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
@@ -241,24 +231,9 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     let start_hidden = std::env::args().any(|a| a == "--tray");
-    let shared: SharedRef = Arc::new(Mutex::new(Shared { config: load_config(), rev: 0, live: Live::default(), hwnd: 0 }));
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("AudioDuck")
-            .with_inner_size([640.0, 780.0])
-            .with_min_inner_size([480.0, 420.0])
-            .with_visible(!start_hidden)
-            .with_icon(eframe::egui::IconData { rgba: icon_rgba(ACCENT, 64), width: 64, height: 64 }),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "AudioDuck",
-        options,
-        Box::new(move |cc| {
-            let app = ui::App::new(cc, shared.clone(), start_hidden);
-            let ctx = cc.egui_ctx.clone();
-            std::thread::spawn(move || engine_thread(shared, ctx));
-            Ok(Box::new(app))
-        }),
-    )
+    let shared: SharedRef = Arc::new(Mutex::new(Shared { config: load_config(), rev: 0, live: Live::default(), visible: false }));
+    let engine_shared = shared.clone();
+    ui::run(shared, start_hidden, move |window| {
+        std::thread::spawn(move || engine_thread(engine_shared, window));
+    })
 }

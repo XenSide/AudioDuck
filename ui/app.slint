@@ -1,0 +1,343 @@
+import { Button, CheckBox, LineEdit, ScrollView, Slider, SpinBox } from "std-widgets.slint";
+
+export struct RuleRow { enabled: bool, sources: string, targets: string, level: string }
+export struct AppRow { name: string, peak: float, loud: bool, vol: string, lowered: bool }
+export struct Pick { name: string, checked: bool }
+
+global Theme {
+    out property <color> bg: #15161b;
+    out property <color> card: #1e2027;
+    out property <color> row: #252832;
+    out property <color> border: #2a2d36;
+    out property <color> track: #2a2d36;
+    out property <color> text: #e6e8ee;
+    out property <color> muted: #8b90a0;
+    out property <color> accent: #7c9cff;
+    out property <color> ducking: #ffb454;
+}
+
+component Toggle inherits Rectangle {
+    in-out property <bool> on;
+    callback toggled(bool);
+    width: 46px;
+    height: 26px;
+    border-radius: 13px;
+    background: on ? Theme.accent : #3a3e4a;
+    animate background { duration: 120ms; }
+    Rectangle {
+        width: 18px;
+        height: 18px;
+        y: 4px;
+        x: on ? parent.width - 22px : 4px;
+        border-radius: 9px;
+        background: white;
+        animate x { duration: 120ms; }
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.on = !root.on;
+            root.toggled(root.on);
+        }
+    }
+}
+
+component PrimaryButton inherits Rectangle {
+    in property <string> text;
+    callback clicked;
+    border-radius: 7px;
+    background: ta.has-hover ? Theme.accent.brighter(8%) : Theme.accent;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        Text { text: root.text; color: Theme.bg; font-weight: 600; vertical-alignment: center; }
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component Card inherits Rectangle {
+    background: Theme.card;
+    border-color: Theme.border;
+    border-width: 1px;
+    border-radius: 12px;
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+        @children
+    }
+}
+
+component CardTitle inherits Text {
+    color: Theme.text;
+    font-size: 16px;
+    font-weight: 600;
+    vertical-alignment: center;
+}
+
+component Label inherits Text {
+    color: Theme.text;
+    vertical-alignment: center;
+}
+
+component MsRow inherits HorizontalLayout {
+    in property <string> label;
+    in-out property <int> value;
+    callback edited();
+    spacing: 16px;
+    Label { text: root.label; width: 110px; }
+    SpinBox {
+        width: 150px;
+        minimum: 0;
+        maximum: 5000;
+        step-size: 10;
+        value <=> root.value;
+        edited => { root.edited(); }
+    }
+    Label { text: "ms"; color: Theme.muted; }
+    Rectangle { }
+}
+
+component PickList inherits VerticalLayout {
+    in property <string> title;
+    in property <[Pick]> items;
+    callback toggled(int, bool);
+    spacing: 6px;
+    Label { text: root.title; font-weight: 600; }
+    Rectangle {
+        height: 216px;
+        background: Theme.bg;
+        border-radius: 8px;
+        ScrollView {
+            x: 8px;
+            y: 8px;
+            width: parent.width - 16px;
+            height: parent.height - 16px;
+            VerticalLayout {
+                alignment: start;
+                for p[i] in root.items: CheckBox {
+                    text: p.name;
+                    checked: p.checked;
+                    toggled => { root.toggled(i, self.checked); }
+                }
+            }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    in property <image> app-icon;
+    in-out property <bool> enabled;
+    in property <string> status;
+    in property <bool> lowering;
+    in property <[RuleRow]> rules;
+    in property <[AppRow]> apps;
+    in-out property <float> threshold;
+    in-out property <int> fade-down;
+    in-out property <int> hold;
+    in-out property <int> fade-up;
+
+    in-out property <bool> editor-open;
+    in property <string> editor-title;
+    in property <[Pick]> sources;
+    in property <[Pick]> targets;
+    in-out property <bool> all-others;
+    in-out property <float> level;
+    in-out property <string> manual;
+    in property <string> editor-error;
+
+    callback enabled-toggled(bool);
+    callback rule-toggled(int, bool);
+    callback edit-rule(int);
+    callback delete-rule(int);
+    callback new-rule();
+    callback settings-changed();
+    callback pick(bool, int, bool);
+    callback add-manual();
+    callback save();
+    callback cancel();
+
+    title: "AudioDuck";
+    icon: app-icon;
+    preferred-width: 640px;
+    preferred-height: 780px;
+    min-width: 480px;
+    min-height: 420px;
+    background: Theme.bg;
+    default-font-size: 14px;
+
+    sv := ScrollView {
+        content-width: self.visible-width;
+        content-height: col.preferred-height;
+        col := VerticalLayout {
+            width: sv.visible-width;
+            padding-left: 20px;
+            padding-right: 20px;
+            padding-top: 16px;
+            padding-bottom: 20px;
+            spacing: 12px;
+
+            HorizontalLayout {
+                VerticalLayout {
+                    Text { text: "AudioDuck"; color: Theme.text; font-size: 24px; font-weight: 600; }
+                    Text { text: root.status; color: root.lowering ? Theme.ducking : Theme.muted; }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Toggle {
+                        on <=> root.enabled;
+                        toggled(on) => { root.enabled-toggled(on); }
+                    }
+                }
+            }
+
+            Card {
+                HorizontalLayout {
+                    CardTitle { text: "Rules"; }
+                    PrimaryButton {
+                        text: "+ New rule";
+                        clicked => { root.new-rule(); }
+                    }
+                }
+                if root.rules.length == 0: Text {
+                    text: "No rules yet. Example: when Discord plays, lower Spotify to 20%.";
+                    color: Theme.muted;
+                    wrap: word-wrap;
+                }
+                for r[i] in root.rules: Rectangle {
+                    background: Theme.row;
+                    border-radius: 8px;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 6px;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
+                        spacing: 8px;
+                        CheckBox {
+                            checked: r.enabled;
+                            toggled => { root.rule-toggled(i, self.checked); }
+                        }
+                        Label { text: r.sources; font-weight: 600; }
+                        Label { text: "→"; color: Theme.muted; }
+                        Label { text: r.targets; overflow: elide; horizontal-stretch: 1; }
+                        Label { text: r.level; color: Theme.muted; }
+                        Button { text: "Edit"; clicked => { root.edit-rule(i); } }
+                        Button { text: "×"; clicked => { root.delete-rule(i); } }
+                    }
+                }
+            }
+
+            Card {
+                CardTitle { text: "Apps playing"; }
+                if root.apps.length == 0: Text { text: "No app is playing audio."; color: Theme.muted; }
+                for a in root.apps: HorizontalLayout {
+                    spacing: 14px;
+                    min-height: 22px;
+                    Label { text: a.name; width: 150px; overflow: elide; }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        Rectangle {
+                            y: (parent.height - self.height) / 2;
+                            height: 8px;
+                            border-radius: 4px;
+                            background: Theme.track;
+                            Rectangle {
+                                x: 0;
+                                height: parent.height;
+                                width: max(8px, parent.width * clamp(a.peak, 0, 1));
+                                border-radius: 4px;
+                                background: a.loud ? Theme.ducking : Theme.accent;
+                            }
+                        }
+                    }
+                    Label { text: a.vol; width: 80px; color: a.lowered ? Theme.ducking : Theme.muted; }
+                }
+            }
+
+            Card {
+                CardTitle { text: "Settings"; }
+                HorizontalLayout {
+                    spacing: 16px;
+                    Label { text: "Threshold"; width: 110px; }
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 1;
+                        maximum: 30;
+                        step: 1;
+                        value <=> root.threshold;
+                        changed => { root.settings-changed(); }
+                    }
+                    Label { text: round(root.threshold) + "%"; width: 40px; horizontal-alignment: right; }
+                }
+                MsRow { label: "Fade down"; value <=> root.fade-down; edited => { root.settings-changed(); } }
+                MsRow { label: "Hold"; value <=> root.hold; edited => { root.settings-changed(); } }
+                MsRow { label: "Fade up"; value <=> root.fade-up; edited => { root.settings-changed(); } }
+            }
+        }
+    }
+
+    if root.editor-open: Rectangle {
+        background: #000000a0;
+        TouchArea { clicked => { root.cancel(); } }
+        Rectangle {
+            width: min(580px, root.width - 40px);
+            height: ed.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.card;
+            border-color: Theme.border;
+            border-width: 1px;
+            border-radius: 12px;
+            TouchArea { } // swallow clicks so they don't reach the backdrop
+            ed := VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+                Text { text: root.editor-title; color: Theme.text; font-size: 18px; font-weight: 600; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    PickList {
+                        title: "When this plays…";
+                        items: root.sources;
+                        toggled(i, on) => { root.pick(false, i, on); }
+                    }
+                    VerticalLayout {
+                        spacing: 8px;
+                        PickList {
+                            // with all-others the list is exclusions
+                            title: root.all-others ? "…except these" : "…lower";
+                            items: root.targets;
+                            toggled(i, on) => { root.pick(true, i, on); }
+                        }
+                        CheckBox { text: "Lower all other apps"; checked <=> root.all-others; }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit {
+                        placeholder-text: "App not playing yet, e.g. spotify.exe";
+                        text <=> root.manual;
+                        accepted => { root.add-manual(); }
+                    }
+                    Button { text: "Add"; clicked => { root.add-manual(); } }
+                }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Label { text: "Volume while ducking"; }
+                    Slider { horizontal-stretch: 1; minimum: 0; maximum: 100; step: 1; value <=> root.level; }
+                    Label { text: round(root.level) + "%"; width: 40px; horizontal-alignment: right; }
+                }
+                if root.editor-error != "": Text { text: root.editor-error; color: Theme.ducking; }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    Button { text: "Cancel"; clicked => { root.cancel(); } }
+                    PrimaryButton { text: "Save"; clicked => { root.save(); } }
+                }
+            }
+        }
+    }
+}
