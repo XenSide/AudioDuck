@@ -131,9 +131,9 @@ fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
     let mut mixer = audio::Mixer::new(state);
     let mut cfg = shared.lock().unwrap().config.clone();
 
-    let open = MenuItem::new("Apri AudioDuck", true, None);
-    let toggle = CheckMenuItem::new("Ducking attivo", true, cfg.enabled, None);
-    let quit = MenuItem::new("Esci", true, None);
+    let open = MenuItem::new("Open AudioDuck", true, None);
+    let toggle = CheckMenuItem::new("Ducking on", true, cfg.enabled, None);
+    let quit = MenuItem::new("Quit", true, None);
     let menu = Menu::new();
     let _ = menu.append_items(&[&open, &toggle, &PredefinedMenuItem::separator(), &quit]);
     // tray-icon needs a message loop on its thread: the wait below pumps it.
@@ -217,7 +217,7 @@ fn engine_thread(shared: SharedRef, ctx: eframe::egui::Context) {
             was = (cfg.enabled, Some(ducking));
             if let Some(t) = &tray {
                 let _ = t.set_icon(tray_icon(if ducking { DUCKING } else if cfg.enabled { ACCENT } else { OFF }));
-                let _ = t.set_tooltip(Some(format!("AudioDuck — {}", if ducking { "sta abbassando" } else if cfg.enabled { "attivo" } else { "in pausa" })));
+                let _ = t.set_tooltip(Some(format!("AudioDuck — {}", if ducking { "lowering" } else if cfg.enabled { "on" } else { "paused" })));
             }
             toggle.set_checked(cfg.enabled);
         }

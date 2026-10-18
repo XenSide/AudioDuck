@@ -158,12 +158,12 @@ impl Editor {
             .frame(Frame::new().fill(CARD).stroke(Stroke::new(1.0, BORDER)).corner_radius(12).inner_margin(Margin::same(18)))
             .show(ctx, |ui| {
                 ui.set_width(540.0);
-                ui.label(RichText::new(if self.index.is_some() { "Modifica regola" } else { "Nuova regola" }).size(18.0).family(semibold()));
+                ui.label(RichText::new(if self.index.is_some() { "Edit rule" } else { "New rule" }).size(18.0).family(semibold()));
                 ui.add_space(4.0);
                 ui.columns(2, |cols| {
                     let all_others = self.all_others;
-                    let right = if all_others { "…tranne queste" } else { "…abbassa" }; // with all_others the list is exclusions
-                    for (ui, (title, list)) in cols.iter_mut().zip([("Quando suona…", &mut self.sources), (right, &mut self.targets)]) {
+                    let right = if all_others { "…except these" } else { "…lower" }; // with all_others the list is exclusions
+                    for (ui, (title, list)) in cols.iter_mut().zip([("When this plays…", &mut self.sources), (right, &mut self.targets)]) {
                         ui.label(RichText::new(title).family(semibold()));
                         Frame::new().fill(BG).corner_radius(8).inner_margin(Margin::same(8)).show(ui, |ui| {
                             ui.set_width(ui.available_width());
@@ -174,16 +174,16 @@ impl Editor {
                             });
                         });
                     }
-                    cols[1].checkbox(&mut self.all_others, "Abbassa tutte le altre app");
+                    cols[1].checkbox(&mut self.all_others, "Lower all other apps");
                 });
                 ui.horizontal(|ui| {
-                    let edit = ui.add(egui::TextEdit::singleline(&mut self.manual).hint_text("App non in riproduzione, es. spotify.exe").desired_width(ui.available_width() - 100.0));
-                    if ui.button("Aggiungi").clicked() || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                    let edit = ui.add(egui::TextEdit::singleline(&mut self.manual).hint_text("App not playing yet, e.g. spotify.exe").desired_width(ui.available_width() - 100.0));
+                    if ui.button("Add").clicked() || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                         self.add_manual();
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Volume durante il ducking");
+                    ui.label("Volume while ducking");
                     let mut pct = (self.level * 100.0).round() as i32;
                     ui.spacing_mut().slider_width = ui.available_width() - 70.0;
                     if ui.add(Slider::new(&mut pct, 0..=100).suffix("%")).changed() {
@@ -195,17 +195,17 @@ impl Editor {
                 }
                 ui.add_space(4.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if primary_button(ui, "Salva") {
+                    if primary_button(ui, "Save") {
                         let (sources, targets) = (Self::checked(&self.sources), Self::checked(&self.targets));
                         if sources.is_empty() {
-                            self.error = "Scegli almeno un'app che fa scattare il ducking.";
+                            self.error = "Pick at least one app that triggers ducking.";
                         } else if !self.all_others && targets.is_empty() {
-                            self.error = "Scegli almeno un'app da abbassare.";
+                            self.error = "Pick at least one app to lower.";
                         } else {
                             result = (true, Some(Rule { sources, targets, all_others: self.all_others, level: self.level, enabled: self.enabled }));
                         }
                     }
-                    if ui.button("Annulla").clicked() {
+                    if ui.button("Cancel").clicked() {
                         result = (true, None);
                     }
                 });
@@ -236,21 +236,21 @@ impl App {
 
     fn rules(&mut self, ui: &mut Ui, config: &mut Config, live: &Live) {
         let mut new_rule = false;
-        card(ui, "Regole", |ui| new_rule = primary_button(ui, "+ Nuova regola"), |ui| {
+        card(ui, "Rules", |ui| new_rule = primary_button(ui, "+ New rule"), |ui| {
             if config.rules.is_empty() {
-                ui.label(RichText::new("Nessuna regola. Esempio: quando suona Discord, abbassa Spotify al 20%.").color(MUTED));
+                ui.label(RichText::new("No rules yet. Example: when Discord plays, lower Spotify to 20%.").color(MUTED));
             }
             let mut delete = None;
             for (i, rule) in config.rules.iter_mut().enumerate() {
                 Frame::new().fill(ROW).corner_radius(8).inner_margin(Margin { left: 10, right: 6, top: 6, bottom: 6 }).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut rule.enabled, "").on_hover_text("Attiva/disattiva regola");
+                        ui.checkbox(&mut rule.enabled, "").on_hover_text("Turn rule on or off");
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button("×").on_hover_text("Elimina").clicked() {
+                            if ui.button("×").on_hover_text("Delete").clicked() {
                                 delete = Some(i);
                             }
-                            if ui.button("Modifica").clicked() {
+                            if ui.button("Edit").clicked() {
                                 self.editor = Some(Editor::new(Some(i), rule, live.peaks.iter().map(|(a, _)| a.clone())));
                             }
                             ui.label(RichText::new(format!("{}%", (rule.level * 100.0).round())).color(MUTED));
@@ -258,8 +258,8 @@ impl App {
                                 let sources = rule.sources.iter().map(|a| pretty(a)).collect::<Vec<_>>().join(", ");
                                 let listed = rule.targets.iter().map(|a| pretty(a)).collect::<Vec<_>>().join(", ");
                                 let targets = match (rule.all_others, rule.targets.is_empty()) {
-                                    (true, true) => "tutte le altre app".into(),
-                                    (true, false) => format!("tutte le altre app tranne {listed}"),
+                                    (true, true) => "all other apps".into(),
+                                    (true, false) => format!("all other apps except {listed}"),
                                     _ => listed,
                                 };
                                 ui.label(RichText::new(sources).family(semibold()));
@@ -280,9 +280,9 @@ impl App {
     }
 
     fn apps(ui: &mut Ui, config: &Config, live: &Live) {
-        card(ui, "App in riproduzione", |_| {}, |ui| {
+        card(ui, "Apps playing", |_| {}, |ui| {
             if live.peaks.is_empty() {
-                ui.label(RichText::new("Nessuna app sta usando l'audio.").color(MUTED));
+                ui.label(RichText::new("No app is playing audio.").color(MUTED));
                 return;
             }
             let bar_width = (ui.available_width() - 260.0).max(80.0);
@@ -301,17 +301,17 @@ impl App {
     }
 
     fn settings(ui: &mut Ui, config: &mut Config) {
-        card(ui, "Impostazioni", |_| {}, |ui| {
+        card(ui, "Settings", |_| {}, |ui| {
             let s = &mut config.settings;
             egui::Grid::new("settings").num_columns(2).spacing(vec2(16.0, 10.0)).show(ui, |ui| {
-                ui.label("Soglia attivazione").on_hover_text("Le barre diventano arancioni sopra la soglia");
+                ui.label("Threshold").on_hover_text("Bars turn orange above the threshold");
                 let mut pct = (s.threshold * 100.0).round() as i32;
                 ui.spacing_mut().slider_width = (ui.available_width() - 60.0).max(120.0);
                 if ui.add(Slider::new(&mut pct, 1..=30).suffix("%")).changed() {
                     s.threshold = pct as f32 / 100.0;
                 }
                 ui.end_row();
-                for (label, v) in [("Discesa", &mut s.attack_ms), ("Attesa prima di risalire", &mut s.hold_ms), ("Risalita", &mut s.release_ms)] {
+                for (label, v) in [("Fade down", &mut s.attack_ms), ("Hold", &mut s.hold_ms), ("Fade up", &mut s.release_ms)] {
                     ui.label(label);
                     ui.add(egui::DragValue::new(v).range(0..=5000).speed(10).suffix(" ms"));
                     ui.end_row();
@@ -360,7 +360,7 @@ impl eframe::App for App {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 0.0;
                             ui.label(RichText::new("AudioDuck").size(24.0).family(semibold()));
-                            let status = if !config.enabled { "In pausa" } else if live.ducking { "Sta abbassando il volume…" } else { "In ascolto" };
+                            let status = if !config.enabled { "Paused" } else if live.ducking { "Lowering the volume…" } else { "Listening" };
                             ui.label(RichText::new(status).color(if live.ducking && config.enabled { DUCKING } else { MUTED }));
                         });
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| toggle(ui, &mut config.enabled));
