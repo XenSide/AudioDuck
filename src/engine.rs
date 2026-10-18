@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-/// What one Stream Deck key does; it is that key's settings (plus its style fields, ignored here).
 pub struct Rule {
     pub sources: Vec<String>,
     /// Apps to duck; with `all_others`, apps to leave alone.
@@ -44,8 +43,6 @@ impl Default for Settings {
 #[derive(Default)]
 pub struct Ducker {
     pub gains: HashMap<String, f32>,
-    /// Per rule (same order as `rules`): whether it is ducking right now.
-    pub active: Vec<bool>,
     t: f64,
     last_loud: HashMap<usize, f64>, // rule index -> time its sources were last above threshold
 }
@@ -66,16 +63,14 @@ impl Ducker {
         }
 
         let mut desired: HashMap<&str, f32> = peaks.keys().map(|a| (a.as_str(), 1.0)).collect();
-        self.active = rules.iter().enumerate().map(|(i, r)| r.enabled && self.last_loud.get(&i).is_some_and(|&t| self.t - t <= s.hold_ms as f64)).collect();
         for (i, r) in rules.iter().enumerate() {
-            if !self.active[i] {
+            let active = r.enabled && self.last_loud.get(&i).is_some_and(|&t| self.t - t <= s.hold_ms as f64);
+            if !active {
                 continue;
             }
             for (app, want) in desired.iter_mut() {
                 let listed = r.targets.iter().any(|x| x == app);
-                // VolumeProxy's foreground.exe mirrors the focused app, which is ducked (or is a source) on its own:
-                // ducking the mirror too would duck a source like Firefox by its own audio.
-                let hit = if r.all_others { !listed && *app != "foreground.exe" && !r.sources.iter().any(|x| x == app) } else { listed };
+                let hit = if r.all_others { !listed && !r.sources.iter().any(|x| x == app) } else { listed };
                 if hit {
                     *want = want.min(r.level);
                 }
@@ -124,7 +119,6 @@ mod tests {
         assert_eq!(run(&mut d, &rules, &s, &quiet, 250)["spotify.exe"], 0.2); // still holding
         assert_eq!(run(&mut d, &rules, &s, &quiet, 400)["spotify.exe"], 1.0); // released
         assert_eq!(d.gains["discord.exe"], 1.0);
-        assert_eq!(d.active, [false]);
     }
 
     #[test]
@@ -137,14 +131,6 @@ mod tests {
         let mut d = Ducker::default();
         let g = d.step(&rules, &s, &peaks(&[("discord.exe", 1.0), ("spotify.exe", 0.1), ("firefox.exe", 0.1), ("foreground.exe", 0.0)]), 10.0);
         assert_eq!((g["discord.exe"], g["spotify.exe"], g["firefox.exe"], g["foreground.exe"]), (1.0, 0.1, 0.5, 1.0));
-    }
-
-    #[test]
-    fn all_others_leaves_volumeproxy_alone() {
-        let rules = [Rule { sources: vec!["firefox.exe".into()], all_others: true, ..Default::default() }];
-        let s = Settings { attack_ms: 0, ..Default::default() };
-        let g = Ducker::default().step(&rules, &s, &peaks(&[("firefox.exe", 1.0), ("foreground.exe", 1.0), ("spotify.exe", 0.1)]), 10.0).clone();
-        assert_eq!((g["firefox.exe"], g["foreground.exe"], g["spotify.exe"]), (1.0, 1.0, 0.2));
     }
 
     #[test]
