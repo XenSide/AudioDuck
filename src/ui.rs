@@ -70,7 +70,7 @@ fn setup_style(ctx: &egui::Context) {
         s.spacing.item_spacing = vec2(8.0, 8.0);
         s.spacing.button_padding = vec2(12.0, 6.0);
         s.spacing.interact_size.y = 26.0;
-        for (_, f) in s.text_styles.iter_mut() {
+        for f in s.text_styles.values_mut() {
             f.size += 1.5;
         }
     });
