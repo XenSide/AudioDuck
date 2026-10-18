@@ -12,13 +12,15 @@ use engine::{Ducker, Rule, Settings};
 use serde::{Deserialize, Serialize};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HWND};
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HWND, WAIT_OBJECT_0};
+use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, OpenEventW, SetEvent};
 use windows::core::w;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const TICK_MS: u32 = 30;
+// A second launch sets this so the running instance shows its window.
+const SHOW_EVENT: windows::core::PCWSTR = w!("AudioDuck.Show");
 const REFRESH: Duration = Duration::from_secs(1);
 pub const ACCENT: [u8; 3] = [124, 156, 255];
 pub const DUCKING: [u8; 3] = [255, 180, 84];
@@ -125,6 +127,7 @@ fn engine_thread(shared: SharedRef, window: slint::Weak<ui::MainWindow>) {
     }
     let mut mixer = audio::Mixer::new(state);
     let mut cfg = shared.lock().unwrap().config.clone();
+    let show_event = unsafe { CreateEventW(None, false, false, SHOW_EVENT) }.ok();
 
     let open = MenuItem::new("Open AudioDuck", true, None);
     let toggle = CheckMenuItem::new("Ducking on", true, cfg.enabled, None);
@@ -145,7 +148,9 @@ fn engine_thread(shared: SharedRef, window: slint::Weak<ui::MainWindow>) {
 
     loop {
         unsafe {
-            MsgWaitForMultipleObjects(None, false, TICK_MS, QS_ALLINPUT);
+            if MsgWaitForMultipleObjects(show_event.as_ref().map(std::slice::from_ref), false, TICK_MS, QS_ALLINPUT) == WAIT_OBJECT_0 && show_event.is_some() {
+                show();
+            }
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 let _ = TranslateMessage(&msg);
@@ -225,8 +230,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // Two instances would each take the other's ducked volume as the user's and push it down for good.
     let _single = unsafe { CreateMutexW(None, false, w!("AudioDuck.SingleInstance")) };
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-        if let Ok(h) = unsafe { FindWindowW(w!("Window Class"), w!("AudioDuck")) } {
-            show_window(h.0 as isize);
+        if let Ok(e) = unsafe { OpenEventW(EVENT_MODIFY_STATE, false, SHOW_EVENT) } {
+            let _ = unsafe { SetEvent(e) };
         }
         return Ok(());
     }
