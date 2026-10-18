@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Frame, Id, Layout, Margin, Modal, ProgressBar, RichText,
+    self, Align, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Frame, Id, Label, Layout, Margin, Modal, ProgressBar, RichText,
     ScrollArea, Sense, Slider, Stroke, Ui, ViewportCommand, vec2,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -285,16 +285,11 @@ impl App {
                 ui.label(RichText::new("No app is playing audio.").color(MUTED));
                 return;
             }
-            let bar_width = (ui.available_width() - 260.0).max(80.0);
+            let bar_width = (ui.available_width() - 268.0).max(80.0); // two 120px min columns + 2x14 spacing
             egui::Grid::new("apps").num_columns(3).spacing(vec2(14.0, 10.0)).min_col_width(120.0).show(ui, |ui| {
                 for (app, peak) in &live.peaks {
-                    // long process names would push the whole window wider than it is
-                    let name = pretty(app);
-                    if name.chars().count() > 18 {
-                        ui.label(format!("{}…", name.chars().take(17).collect::<String>())).on_hover_text(name);
-                    } else {
-                        ui.label(name);
-                    }
+                    // truncate to the 120px column so long process names can't widen the card
+                    ui.add(Label::new(pretty(app)).truncate());
                     let loud = *peak > config.settings.threshold; // orange = loud enough to trigger a rule
                     ui.add(ProgressBar::new(*peak).desired_width(bar_width).desired_height(8.0).corner_radius(4).fill(if loud { DUCKING } else { ACCENT }));
                     let g = if config.enabled { live.gains.get(app).copied().unwrap_or(1.0) } else { 1.0 };
